@@ -10,10 +10,10 @@
 
 需求：macOS Apple Silicon、原生 arm64 Node.js **22 以上**、Git。範例設定使用安裝程序下載的 Chromium；也可以選擇已安裝的 Google Chrome。無需 Vercel、資料庫、VPS 或瀏覽器外掛。
 
-將 `<GITHUB_REPOSITORY_URL>` 換成此專案實際 GitHub URL；交付檔案沒有預設或虛構的 GitHub remote。
+GitHub repository：[Zhong-627/takachiho-sniper](https://github.com/Zhong-627/takachiho-sniper)。
 
 ```bash
-git clone <GITHUB_REPOSITORY_URL> takachiho-reservation
+git clone https://github.com/Zhong-627/takachiho-sniper.git takachiho-reservation
 cd takachiho-reservation
 npm run setup
 cp config/config.example.json config/config.local.json

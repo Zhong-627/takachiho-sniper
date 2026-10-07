@@ -14,4 +14,4 @@
 
 真實 hold、Customer Information DOM、付款及 3D Secure **沒有在 Cloud 執行**。自動審查曾拒絕真實時段點擊，因為選擇可能扣減名額；後续確認採用公開 JavaScript 與零 hold 的頁面讀取。Mac 需依 [檢查清單](MAC_CHECKLIST.md) 用帶明確確認旗標的 full-rehearsal 確認实际表單、額外 assets 及 Autofill。若客戶頁有尚未驗證的資源，guard 會阻擋並留下診斷；先人工檢查其精確路徑與來源，不能擴大為任意 GET allowlist。
 
-GitHub Actions workflow 已建立，測試階段只有 loopback 網路。尚未提供 GitHub repository 目的地，因此尚未推送 remote 或實際執行 GitHub Actions。專案附鎖定相依套件、CI、文件及本機 Git history，供推送後從 GitHub clone。
+GitHub 推送目標已指定為 [Zhong-627/takachiho-sniper](https://github.com/Zhong-627/takachiho-sniper)。GitHub Actions workflow 已建立，測試階段只有 loopback 網路。上述通過紀錄來自本機 Cloud 驗證，尚未確認 GitHub Actions 執行結果；推送後請在 repository 的 [Actions 頁面](https://github.com/Zhong-627/takachiho-sniper/actions) 檢查狀態。專案附鎖定相依套件、CI、文件及 Git history，可依 README 從 GitHub clone。
