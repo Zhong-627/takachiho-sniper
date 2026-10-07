@@ -1,0 +1,32 @@
+[
+  {
+    "service_cd": "6892dd9d-5b54-4202-bd1d-4aa6c0a8018d",
+    "session_cd": "68a914cc-b08c-4413-94a1-9dd8c0a8018d",
+    "service_start_datetime": "2026/10/26 10:00:00",
+    "service_end_datetime": "2026/10/26 10:30:00",
+    "calendar_select_action_type": "1",
+    "ordable": false,
+    "reserve_possible": false,
+    "is_reserve_started": false,
+    "enabled_flg": true,
+    "is_accept": true,
+    "is_reserve_dead": false,
+    "is_full": false,
+    "order_remain_amount": "15"
+  },
+  {
+    "service_cd": "6892dd9d-5b54-4202-bd1d-4aa6c0a8018d",
+    "session_cd": "68a914cc-b08c-4413-94a1-9dd8c0a8018d",
+    "service_start_datetime": "2026/10/26 10:30:00",
+    "service_end_datetime": "2026/10/26 11:00:00",
+    "calendar_select_action_type": "1",
+    "ordable": false,
+    "reserve_possible": false,
+    "is_reserve_started": false,
+    "enabled_flg": true,
+    "is_accept": true,
+    "is_reserve_dead": false,
+    "is_full": false,
+    "order_remain_amount": "15"
+  }
+]

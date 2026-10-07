@@ -1,0 +1,82 @@
+{
+  "observedAt": "2026-10-07T00:26:05.049Z",
+  "mode": "rehearsal",
+  "targetDate": "2026-10-26",
+  "environment": "Linux x64 managed Cloud; system Chromium151; official eipro site",
+  "reservationHoldRequests": 0,
+  "customerNavigations": 0,
+  "slots": {
+    "10:00": {
+      "statuses": [
+        "unavailable",
+        "unavailable",
+        "unavailable"
+      ],
+      "readResponseMs": [
+        323.497,
+        585.441,
+        604.52
+      ],
+      "navigationMs": [
+        4476.517
+      ],
+      "plannedActions": [
+        {
+          "available": false,
+          "hold": {
+            "method": "POST",
+            "path": "/takachiho1/apiServices/api/hold_slot",
+            "slot": "10:00"
+          },
+          "plannedFields": {
+            "service_cd": "6892dd9d-5b54-4202-bd1d-4aa6c0a8018d",
+            "service_session_cd": "68a914cc-b08c-4413-94a1-9dd8c0a8018d",
+            "service_start_datetime": "2026/10/26 10:00:00",
+            "service_end_datetime": "2026/10/26 10:30:00"
+          },
+          "customerNavigation": {
+            "method": "GET",
+            "path": "/takachiho1/orders/add"
+          },
+          "sideEffectsEnabled": false
+        }
+      ]
+    },
+    "10:30": {
+      "statuses": [
+        "unavailable",
+        "unavailable",
+        "unavailable"
+      ],
+      "readResponseMs": [
+        295.666,
+        570.012,
+        543.625
+      ],
+      "navigationMs": [
+        3188.597
+      ],
+      "plannedActions": [
+        {
+          "available": false,
+          "hold": {
+            "method": "POST",
+            "path": "/takachiho1/apiServices/api/hold_slot",
+            "slot": "10:30"
+          },
+          "plannedFields": {
+            "service_cd": "6892dd9d-5b54-4202-bd1d-4aa6c0a8018d",
+            "service_session_cd": "68a914cc-b08c-4413-94a1-9dd8c0a8018d",
+            "service_start_datetime": "2026/10/26 10:30:00",
+            "service_end_datetime": "2026/10/26 11:00:00"
+          },
+          "customerNavigation": {
+            "method": "GET",
+            "path": "/takachiho1/orders/add"
+          },
+          "sideEffectsEnabled": false
+        }
+      ]
+    }
+  }
+}

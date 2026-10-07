@@ -1,0 +1,14 @@
+{
+  "targetDate": "2026-10-26",
+  "releaseAt": "2026-10-12T09:00:00+09:00",
+  "slots": ["10:00", "10:30"],
+  "browser": { "channel": "chromium", "headless": false },
+  "polling": { "maxAttempts": 80, "baseDelayMs": 1250, "maxDelayMs": 20000 },
+  "timeouts": { "navigationMs": 30000, "actionMs": 10000, "customerFormMs": 30000 },
+  "warmupSeconds": 120,
+  "artifactsDir": "artifacts",
+  "customers": {
+    "10:00": { "representativeName": "", "fields": { "representativeName": "" }, "mappings": [] },
+    "10:30": { "representativeName": "", "fields": { "representativeName": "" }, "mappings": [] }
+  }
+}
