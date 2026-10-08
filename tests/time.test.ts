@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  DEFAULT_RELEASE_AT, cancellableSleep, formatReleaseTimes, releaseEpochMs,
+  cancellableSleep, formatReleaseTimes, releaseEpochMs,
   waitUntilRelease, type Clock,
 } from '../src/time.js';
+import { TEST_TARGET } from './fixtures/config.js';
 
 afterEach(() => vi.useRealTimers());
 
@@ -25,7 +26,7 @@ function fakeClock(start: number, jump?: { onSleep: number; wallBy: number }): C
 
 describe('release time', () => {
   it('maps 09:00 JST to 08:00 Taipei at the exact UTC release instant', () => {
-    const epoch = releaseEpochMs(DEFAULT_RELEASE_AT);
+    const epoch = releaseEpochMs(TEST_TARGET.releaseAt);
     expect(epoch).toBe(Date.UTC(2026, 9, 12, 0, 0, 0));
     expect(formatReleaseTimes(epoch)).toEqual({
       utc: '2026-10-12T00:00:00.000Z',
@@ -43,7 +44,7 @@ describe('release time', () => {
   });
 
   it('waits with bounded timer wakes and releases exactly at the deadline', async () => {
-    const epoch = releaseEpochMs(DEFAULT_RELEASE_AT);
+    const epoch = releaseEpochMs(TEST_TARGET.releaseAt);
     const clock = fakeClock(epoch - 2550);
     const events = vi.fn();
     await waitUntilRelease(epoch, { clock, onEvent: events });
@@ -54,7 +55,7 @@ describe('release time', () => {
   });
 
   it('resynchronizes a backward wall-clock jump and never releases early', async () => {
-    const epoch = releaseEpochMs(DEFAULT_RELEASE_AT);
+    const epoch = releaseEpochMs(TEST_TARGET.releaseAt);
     const clock = fakeClock(epoch - 2500, { onSleep: 1, wallBy: -2000 });
     const events = vi.fn();
     await waitUntilRelease(epoch, { clock, onEvent: events });
@@ -64,7 +65,7 @@ describe('release time', () => {
   });
 
   it('handles a forward wall-clock jump without waiting out an obsolete deadline', async () => {
-    const epoch = releaseEpochMs(DEFAULT_RELEASE_AT);
+    const epoch = releaseEpochMs(TEST_TARGET.releaseAt);
     const clock = fakeClock(epoch - 2500, { onSleep: 1, wallBy: 3000 });
     await waitUntilRelease(epoch, { clock });
     expect(clock.sleeps).toEqual([1000]);
@@ -72,12 +73,21 @@ describe('release time', () => {
   });
 
   it('records late start without sleeping', async () => {
-    const epoch = releaseEpochMs(DEFAULT_RELEASE_AT);
+    const epoch = releaseEpochMs(TEST_TARGET.releaseAt);
     const clock = fakeClock(epoch + 10);
     const events = vi.fn();
     await waitUntilRelease(epoch, { clock, onEvent: events });
     expect(clock.sleeps).toHaveLength(0);
     expect(events.mock.calls.at(-1)?.[1]).toMatchObject({ latenessMs: 10 });
+  });
+  it('waits for a different configured date and release second without the original target', async () => {
+    const releaseAt = '2026-10-20T08:07:06+08:00';
+    const clock = fakeClock(Date.parse(releaseAt) - 1700);
+    const events = vi.fn();
+    await waitUntilRelease(releaseAt, { clock, onEvent: events });
+    expect(clock.wallNow()).toBe(Date.parse(releaseAt));
+    expect(clock.sleeps).toEqual([1000, 700]);
+    expect(events.mock.calls.at(-1)?.[1]).toMatchObject({ taipei: '2026-10-20 08:07:06.000 Asia/Taipei', latenessMs: 0 });
   });
 });
 

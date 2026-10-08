@@ -4,7 +4,7 @@ import type { Browser, BrowserContext, Page } from 'playwright';
 import { autofillCustomer } from './autofill.js';
 import { launchSlotBrowser } from './browser.js';
 import { parseCli } from './cli-options.js';
-import { loadConfig, parseConfig, validateModeConfig, type AppConfig, type RunMode } from './config.js';
+import { assertReservationTargetsUnchanged, loadConfig, parseConfig, ReservationTargetsChangedError, validateModeConfig, type AppConfig, type RunMode } from './config.js';
 import { createDiagnostics, type Diagnostics } from './diagnostics.js';
 import { assertLiveReadiness, recordVerifiedForm } from './readiness.js';
 import { createGuardedContext, type SafetyGuard } from './safety.js';
@@ -28,11 +28,12 @@ interface Session {
 const help = `高千穗峽預約工具（Node.js 22+ / macOS Apple Silicon）
 npm run inspect -- --config config/config.local.json
 npm run rehearsal -- --attempts 3
-npm run full-rehearsal -- --slot 10:00 --date YYYY-MM-DD --confirm-reservation-side-effects
+npm run full-rehearsal -- --slot HH:mm --date YYYY-MM-DD --confirm-reservation-side-effects
 npm run live -- --confirm-reservation-side-effects
 npm run doctor
 安全模式可加 --headless --close。個資與觀察到的表單 mappings 只存本機。
-瀏覽器保留時：f 重新載入設定並填寫目前已 hold 的表單；handoff [10:00|10:30] 交由人工；q 關閉。
+日期、開賣時間、1–2 個時段及各船個資由 local config 指定。時段使用日本當地 HH:mm。
+瀏覽器保留時：f [HH:mm] 重新載入個資並填寫目前已 hold 的表單；handoff [HH:mm] 交由人工；q 關閉。
 程式不送出客戶表單、不付款、不處理 CAPTCHA / OTP / 3D Secure。`;
 
 function personalSecrets(config: AppConfig): string[] {
@@ -43,7 +44,7 @@ function personalSecrets(config: AppConfig): string[] {
 
 async function fillSession(session: Session, config: AppConfig, diagnostics: Diagnostics, mode: RunMode): Promise<void> {
   if (!session.page || !session.guard || session.handedOff || !session.autofillEligible) return;
-  const customer = config.customers[session.slot as '10:00' | '10:30'];
+  const customer = config.customers[session.slot];
   if (!customer) return;
   const result = await autofillCustomer(session.page, customer);
   diagnostics.event('autofill_result', { status: result.status, customerFieldsVerified: result.customerFieldsVerified, filledKeys: result.filledKeys, missingMappingKeys: result.missingMappingKeys, missingRequiredControls: result.missingRequiredControls, manualControls: result.manualControls, errors: result.errors }, session.slot);
@@ -87,7 +88,9 @@ async function operatorConsole(sessions: Map<string, Session>, getConfig: () => 
             console.log(`[${session.slot}] 已停止所有自動化並交由人工操作。請自行完成最後確認、信用卡及 3D Secure。`);
           }
         } else if (command) console.log('可用命令：f [時段]、handoff [時段]、q。');
-      } catch { console.log('操作未完成；請檢查本機設定或瀏覽器狀態。個資不會印出。'); }
+      } catch (error) {
+        console.log(error instanceof ReservationTargetsChangedError ? error.message : '操作未完成；請檢查本機設定或瀏覽器狀態。個資不會印出。');
+      }
     }
     // EOF has no interactive operator. Shut down safely; holds expire server-side.
     abort.abort();
@@ -106,7 +109,7 @@ async function main(): Promise<void> {
   };
   const config = await readLocalConfig();
   if (options.mode === 'doctor') {
-    console.log(JSON.stringify({ platform: process.platform, arch: process.arch, node: process.version, release: formatReleaseTimes(Date.parse(config.releaseAt)), slots: config.slots, channel: config.browser.channel }, null, 2));
+    console.log(JSON.stringify({ platform: process.platform, arch: process.arch, node: process.version, targetDate: config.targetDate, release: formatReleaseTimes(Date.parse(config.releaseAt)), slots: config.slots, channel: config.browser.channel }, null, 2));
     try { validateModeConfig(config, 'live', true); await assertLiveReadiness(config); console.log('Live 本機設定及近期表單驗證紀錄檢查通過。仍需 Mac 真實網站演練。'); }
     catch (error) { console.log(error instanceof Error ? error.message : 'Live 尚未準備完成。'); process.exitCode = 2; }
     return;
@@ -231,6 +234,7 @@ async function main(): Promise<void> {
     } else {
       await operatorConsole(sessions, async () => {
         const updated = await readLocalConfig();
+        if (sideEffects) assertReservationTargetsUnchanged(config, updated);
         validateModeConfig(updated, mode, options.confirmed, options.slot);
         diagnostics.addSecrets(personalSecrets(updated));
         return updated;
@@ -249,7 +253,7 @@ main().catch((error: unknown) => {
   // Config and browser exceptions may contain local path/entered values; no raw
   // Playwright exception is printed. Preflight remains reviewable through doctor.
   const message = error instanceof Error ? error.message : '';
-  if (/^(?:Use |Slot must |full-rehearsal requires |live requires |Reservation modes require |Live target |The live release |Each |Invalid local config:|Cannot read local config\.|Local config must |\[10:(?:00|30)\] Live|\[10:(?:00|30)\] Run full-rehearsal)/u.test(message)) console.error(message);
+  if (/^(?:Use |Slot must |full-rehearsal requires |live requires |Reservation modes require |Live target |The live release |Each |Invalid local config:|Cannot read local config\.|Local config must |\[(?:[01]\d|2[0-3]):[0-5]\d\] (?:Live|Run full-rehearsal))/u.test(message)) console.error(message);
   else console.error('執行未開始或已中止。請確認 CLI 旗標、設定、Chrome 安裝與 doctor；若有 artifacts 請查看診斷。');
   process.exitCode = 1;
 });

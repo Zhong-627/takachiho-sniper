@@ -19,7 +19,7 @@ npm run doctor
 - [ ] 開啟 macOS「日期與時間」自動設定時間，確認系統時鐘與可靠來源一致。
 - [ ] 個資只在 `config/config.local.json`；`git status --short` 沒有出現此檔或 `.local/`／`artifacts/`。
 
-clone 後以 `open -e config/config.local.json` 或 `code config/config.local.json` 編輯。填 `customers["10:00"]` 與 `customers["10:30"]` 各自的 `representativeName` 及 9 個 fields，兩船代表人不同；姓／名合併須與頂層代表人一致。範例已帶 10/8 觀察的 mappings，個資值都是空白。已有 local config 時不要用 cp 覆寫，手動合併新欄位與 mappings。細節見 [README 本機設定](../README.md#本機個資與-autofill) 與 [表單勘查](FORM_20261008.md)。
+clone 後以 `open -e config/config.local.json` 或 `code config/config.local.json` 編輯。先核對 targetDate、releaseAt、1–2 個 slots，再填 `customers[時段]` 各自的 `representativeName` 及 9 個 fields，設定兩船時代表人不同；姓／名合併須與頂層代表人一致。範例已帶 10/8 觀察的 mappings，個資值都是空白。已有 local config 時不要用 cp 覆寫，手動合併新欄位與 mappings。細節見 [README 本機設定](../README.md#本機個資與-autofill) 與 [表單勘查](FORM_20261008.md)。
 
 初次 doctor 可能提示還沒有 customer mappings／full rehearsal receipt。這表示尚未具備 live readiness，先完成以下真站流程。
 
@@ -29,8 +29,8 @@ clone 後以 `open -e config/config.local.json` 或 `code config/config.local.js
 npm run inspect
 ```
 
-- [ ] 可見瀏覽器開啟真實 EIPrO；目標日期為 2026-10-26。
-- [ ] 日曆及 10:00、10:30 可被辨識，兩個時段有各自的診斷。
+- [ ] 可見瀏覽器開啟真實 EIPrO；目標日期符合 local config 的 targetDate。
+- [ ] 日曆及所有設定 slots 可被辨識，各時段有自己的診斷。
 - [ ] 目前未開放時，結果是 unavailable／未開始，remaining 船數沒有被誤判成 available。
 - [ ] 檢查截圖、redirect、HTTP status、network／navigation latency、Cookie metadata、所有 `blocked` 診斷。
 - [ ] 如有 CAPTCHA、queue 或 maintenance，保留畫面，停止自動嘗試；安全模式不會解除 guard 讓使用者建立 hold。
@@ -43,7 +43,7 @@ npm run inspect
 npm run rehearsal -- --attempts 3
 ```
 
-- [ ] 10:00、10:30 都開始自己的演練流程。
+- [ ] 所有設定 slots 都開始自己的演練流程。
 - [ ] 某一 slot 失敗／慢載入，另一個仍繼續並留下獨立 log。
 - [ ] 確認每個 slot 顯示 available／unavailable／unknown，unknown 沒有觸發 action。
 - [ ] 開放前未建立 hold，也沒有進入客戶資料頁。
@@ -59,7 +59,7 @@ npm run rehearsal -- --date YYYY-MM-DD --attempts 3
 
 ## 4. 一次真實 full rehearsal 與欄位驗證
 
-**這一步會真的占用一艘船，通常約 15 分鐘。** 選擇你確實有意驗證的一個目前可預約時段；日／時間先用安全 inspect 確認。工具接受 10:00 或 10:30，full rehearsal 每次只處理一個。
+**這一步會真的占用一艘船，通常約 15 分鐘。** 選擇你確實有意驗證的一個目前可預約時段；日／時間先用安全 inspect 確認。`--slot` 必須是 local config 的 slots 中一個 HH:mm，full rehearsal 每次只處理一個。
 
 1. 在 local config 為該 slot 填入真實 `representativeName` 與 9 個 fields。若這次僅要 discovery，將 fields／mappings 明確設為 `{}`／`[]`，保留頂層代表人；不是把空白資料當作已驗證填寫。
 2. 執行：
@@ -69,7 +69,7 @@ npm run rehearsal -- --date YYYY-MM-DD --attempts 3
    ```
 
 3. 確認只有一次 hold request；成功才導向 `orders/add`。若 timeout／結果不確定，先人工檢查原頁，**不要重新執行來重試 hold**。
-4. 檢查客戶頁 `form-1000.json`／`form-1030.json` schema，比對 10/8 的姓／名、片假名姓／名、Email、電話、地址、生日、人數與當次 DOM。`htmlRequired=false` 不代表可不填；檢查 `requiredSources`、missingObservedFields 與 HTML 限制。只有一份 08:30 表單曾勘查，10:00／10:30 是否相同仍須確認。
+4. 檢查客戶頁 `form-HHmm.json`（例如 `form-1000.json`）schema，比對 10/8 的姓／名、片假名姓／名、Email、電話、地址、生日、人數與當次 DOM。`htmlRequired=false` 不代表可不填；檢查 `requiredSources`、missingObservedFields 與 HTML 限制。只有一份 08:30 表單曾勘查，設定的各日期／時段是否相同仍須確認。
 5. 在 local config 使用當次確認的 `fields`／`mappings` 與自己的資料。人數 select 使用真實 option value；不要自動 check 三項確認或付款。生日格式、輸入後格式化、台灣電話／海外地址接受方式與片假名需要實測；沒有提交伺服器前不能宣稱伺服器驗證已通過。
 6. 保持同一客戶頁，於 CLI 終端輸入 `f` 重新載入設定及驗證；它不會重新 hold。
 7. 確認 customerFieldsVerified、9 個必要客戶欄位非空、當次選項及 HTML validity 通過，`.local/form-verification.json` v2 已由程式更新。v1 舊紀錄不能沿用，也不能因 Cloud 勘查或離線 fixture 測試手寫 receipt。
@@ -89,13 +89,13 @@ npm run rehearsal -- --date YYYY-MM-DD --attempts 3
 npm run doctor
 ```
 
-- [ ] targetDate 為 2026-10-26，releaseAt 為 `2026-10-12T09:00:00+09:00`，slots 完整包含 10:00 與 10:30。
-- [ ] 兩個 slot 使用不同真實代表人，對應官方多艘船規則。
-- [ ] 兩個 slot 的 local mappings 在 live 前 7 天內通過 full rehearsal，receipt 與當前 mappings／欄位 keys 一致。
+- [ ] doctor 輸出的 targetDate、1–2 個 slots 及台北／日本開賣時間均符合本次目標。releaseAt 必須含正確時區，customers key 與各 slot 相符；改目標方法見 [README](../README.md#更改預約日期與時間)。
+- [ ] 若設定兩個 slot，使用不同真實代表人，對應官方多艘船規則。
+- [ ] 每個設定 slot 的 local mappings 在 live 前 7 天內通過 full rehearsal，receipt 與當前 mappings／欄位 keys 一致。
 - [ ] 可見 Chrome／Chromium 沒有 CAPTCHA／queue／維護問題。
 - [ ] Mac 系統時間自動同步、接電、網路穩定、禁用睡眠，不在開放前重啟或關閉終端。
 - [ ] 最後一次安全 inspect／rehearsal 沒有未解決的 DOM 變動或 `blocked` 必要資源。
-- [ ] 清楚知道伺服器 hold 約 15 分鐘；準備好自行處理兩頁後續資料、信用卡與 3D Secure。
+- [ ] 清楚知道伺服器 hold 約 15 分鐘；準備好自行處理成功頁的後續資料、信用卡與 3D Secure。
 
 提前數分鐘啟動，保持終端開啟：
 
@@ -103,7 +103,7 @@ npm run doctor
 caffeinate -dimsu npm run live -- --confirm-reservation-side-effects
 ```
 
-正式時間為 **2026-10-12 08:00:00 台北／09:00:00 日本**。兩個 slot 各自嘗試；成功一個不會取消另一個。任一 slot 一旦派送 hold，就不會重新派送，即使回應不確定。兩頁成功均保留，由你輸入 `handoff` 後分別完成最後確認與付款。
+正式時間取自 local config 的 releaseAt；範例為 **2026-10-12 08:00:00 台北／09:00:00 日本**。各設定 slot 獨立嘗試；兩時段時，成功一個不會取消另一個。任一 slot 一旦派送 hold，就不會重新派送，即使回應不確定。兩頁成功均保留，由你輸入 `handoff` 後分別完成最後確認與付款。
 
 ## 尚無法提前證明的事項
 

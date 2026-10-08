@@ -3,6 +3,7 @@ import { chromium, type Browser, type Page } from 'playwright';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { autofillCustomer, discoverCustomerForm } from '../src/autofill.js';
 import { parseConfig, validateModeConfig, type CustomerConfig } from '../src/config.js';
+import { TEST_TARGET } from './fixtures/config.js';
 import { OBSERVED_CUSTOMER_FIELDS, OBSERVED_FORM_PROFILE, observedSelector } from '../src/observed-form.js';
 
 let browser: Browser;
@@ -162,7 +163,7 @@ describe('2026-10-08 observed customer form, offline reconstructed fixture only'
   it('accepts observed split names only when they identify the asserted representative', () => {
     const first = customer(); const second = customer();
     second.fields.givenName = 'Second'; second.representativeName = 'Fixture Second';
-    const config = parseConfig({ customers: { '10:00': first, '10:30': second } });
+    const config = parseConfig({ ...TEST_TARGET, customers: { '10:00': first, '10:30': second } });
     expect(() => validateModeConfig(config, 'live', true)).not.toThrow();
     config.customers['10:30']!.fields.givenName = 'Example';
     expect(() => validateModeConfig(config, 'live', true)).toThrow('same representative');

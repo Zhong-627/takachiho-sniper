@@ -30,3 +30,11 @@ npm run build
 ```
 
 新增 25 項表單測試及 1 項 receipt 版本測試；涵蓋 raw required=false、9 個值非空、地址／人數 mapping 缺漏、消失／改型／唯讀／重複 control、付款語義優先、三個確認保持人工、精確人數 value、HTML 限制 metadata、姓／名與代表人一致性、舊 receipt 失效。所有新增填寫使用假資料與本機 HTML；沒有再向 EIPrO 建立 hold 或生成真實本機 receipt。本紀錄不等於 GitHub Actions 已通過，CI 以提交後實際狀態為準。
+
+## 2026-10-08：預約目標改由 local config 指定
+
+日期、開賣時間、1–2 個 HH:mm 時段及各船個資改由 local config 讀取，移除原本正式模式固定日期、開賣 instant 與 10:00／10:30 的限制。三個目標欄位必填，保留日期／時區／時段格式、唯一時段、不同代表人、已驗證 mappings、可見瀏覽器及每時段單次 hold 防護。執行中 f 仍可改個資與 mappings；若有效日期、開賣 instant 或時段集合已變更，會拒絕填寫原表單。
+
+Linux x64／Node.js 24.19.0／Playwright Chromium Headless Shell 141：`npm run check` 的 typecheck、lint 與 **206 項測試（13 個 suites）全部通過，無跳過**；`npm run build` 成功。新增 21 項測試，涵蓋必填目標、HH:mm 邊界、漏改 customers key、任意時段的代表人及 readiness、開賣時間等待、執行中目標變更與 CLI 覆寫限制。離線瀏覽器整合案例使用 2026-11-03、09:15／11:45 的合成日曆，兩個流程各取得一次受保護 fixture hold 並使用各自假資料，信用卡／OTP 空白、客戶表單未提交，再次 hold 仍被拒絕。此日期／時段僅為測試資料，不表示官方實際提供。
+
+編譯後的 doctor 另以暫存 config 驗證單／雙自訂時段，正確輸出乘船日期、時段及台北開賣時間，缺少真實 receipt 時維持未就緒。編譯後 full-rehearsal 接受 09:15，再由非互動終端防護停止，沒有啟動瀏覽器。所有測試使用離線 fixture／暫存資料，沒有操作真站或建立新的真實驗證紀錄。Mac Autofill 與正式 availability 仍須依檢查清單確認。

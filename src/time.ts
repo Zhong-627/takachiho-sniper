@@ -1,8 +1,5 @@
 import { performance } from 'node:perf_hooks';
 
-/** The release instant is an offset-bearing ISO value, independent of the Mac timezone. */
-export const DEFAULT_RELEASE_AT = '2026-10-12T09:00:00+09:00';
-
 export type TimingReporter = (event: string, data: Record<string, unknown>) => void;
 
 export interface Clock {

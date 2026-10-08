@@ -5,7 +5,8 @@ import { OBSERVED_CUSTOMER_FIELDS, observedSelector } from './observed-form.js';
 
 export type RunMode = 'inspect' | 'rehearsal' | 'full-rehearsal' | 'live';
 export const DEFAULT_CONFIG_PATH = 'config/config.local.json';
-export const TARGET_SLOTS = ['10:00', '10:30'] as const;
+/** Boarding times are local Japanese HH:mm, not the Mac's timezone. */
+export const slotSchema = z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/u, 'Expected a Japan-local HH:mm slot');
 
 const validDate = (value: string): boolean => {
   if (!/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false;
@@ -35,9 +36,9 @@ export const customerConfigSchema = z.object({
 });
 
 export const configSchema = z.object({
-  targetDate: z.string().refine(validDate, 'Expected a valid YYYY-MM-DD calendar date').default('2026-10-26'),
-  releaseAt: z.string().datetime({ offset: true }).default('2026-10-12T09:00:00+09:00'),
-  slots: z.array(z.enum(TARGET_SLOTS)).min(1).max(2).default([...TARGET_SLOTS]),
+  targetDate: z.string().refine(validDate, 'Expected a valid YYYY-MM-DD calendar date'),
+  releaseAt: z.string().datetime({ offset: true }).refine((value) => Number.isFinite(Date.parse(value)), 'Expected a valid release instant with UTC offset'),
+  slots: z.array(slotSchema).min(1).max(2),
   browser: z.object({
     channel: z.enum(['chrome', 'chromium']).default('chromium'),
     executablePath: z.string().trim().min(1).optional(),
@@ -55,7 +56,7 @@ export const configSchema = z.object({
   }).strict().default({ navigationMs: 30_000, actionMs: 10_000, customerFormMs: 30_000 }),
   warmupSeconds: z.number().int().min(10).max(3600).default(120),
   artifactsDir: z.string().trim().min(1).default('artifacts'),
-  customers: z.partialRecord(z.enum(TARGET_SLOTS), customerConfigSchema).default({}),
+  customers: z.record(slotSchema, customerConfigSchema).default({}),
 }).strict().superRefine((config, context) => {
   if (new Set(config.slots).size !== config.slots.length) {
     context.addIssue({ code: 'custom', message: 'Slots must be independent unique targets', path: ['slots'] });
@@ -72,7 +73,10 @@ export type AppConfig = z.infer<typeof configSchema>;
 export function parseConfig(value: unknown): AppConfig {
   const result = configSchema.safeParse(value);
   if (!result.success) {
-    const issues = result.error.issues.map((issue) => `${issue.path.join('.') || 'config'}: ${issue.message}`);
+    const issues = result.error.issues.map((issue) => {
+      const path = issue.path.map((part, index) => issue.path[0] === 'customers' && index === 1 && !slotSchema.safeParse(part).success ? '<invalid-slot>' : String(part));
+      return `${path.join('.') || 'config'}: ${issue.message}`;
+    });
     throw new Error(`Invalid local config:\n${issues.join('\n')}`);
   }
   return result.data;
@@ -103,17 +107,10 @@ export function validateModeConfig(
   if (mode === 'inspect' || mode === 'rehearsal') return;
   if (!confirmed) throw new Error(`${mode} requires --confirm-reservation-side-effects.`);
   if (config.browser.headless) throw new Error('Reservation modes require a visible browser for manual payment and security challenges.');
-  if (mode === 'full-rehearsal' && (!selectedSlot || !config.slots.includes(selectedSlot as typeof TARGET_SLOTS[number]))) {
+  if (mode === 'full-rehearsal' && (!selectedSlot || !config.slots.includes(selectedSlot))) {
     throw new Error('full-rehearsal requires --slot with one configured target slot.');
   }
-  if (mode === 'live' && (config.slots.length !== 2 || !TARGET_SLOTS.every((slot) => config.slots.includes(slot)))) {
-    throw new Error('live requires both independent target slots: 10:00 and 10:30.');
-  }
-  if (mode === 'live' && (config.targetDate !== '2026-10-26'
-      || new Date(config.releaseAt).getTime() !== new Date('2026-10-12T09:00:00+09:00').getTime())) {
-    throw new Error('live is pinned to 2026-10-26 and release instant 2026-10-12 09:00 Asia/Tokyo.');
-  }
-  const slots = mode === 'full-rehearsal' ? [selectedSlot as typeof TARGET_SLOTS[number]] : config.slots;
+  const slots = mode === 'full-rehearsal' ? [selectedSlot!] : config.slots;
   const representatives = slots.map((slot) => config.customers[slot]?.representativeName.trim() ?? '');
   if (representatives.some((name) => !name || /^REPLACE|^TODO|^YOUR[_ ]/iu.test(name))) {
     throw new Error('Each reservation slot requires an actual representativeName in local customer config.');
@@ -145,5 +142,20 @@ export function validateModeConfig(
     if (mode === 'live' && customer.mappings.some((mapping) => !customer.fields[mapping.key])) {
       throw new Error('live requires a nonempty local value for every customer mapping.');
     }
+  }
+}
+
+export class ReservationTargetsChangedError extends Error {
+  constructor() {
+    super('預約目標已變更：同一份已保留表單只接受個資／mappings 更新。請先確認既有 hold 狀態，再另行啟動新目標。');
+    this.name = 'ReservationTargetsChangedError';
+  }
+}
+
+/** Reloading customer values must not retarget an already running reservation. */
+export function assertReservationTargetsUnchanged(original: AppConfig, updated: AppConfig): void {
+  if (original.targetDate !== updated.targetDate || Date.parse(original.releaseAt) !== Date.parse(updated.releaseAt)
+      || original.slots.length !== updated.slots.length || original.slots.some((slot) => !updated.slots.includes(slot))) {
+    throw new ReservationTargetsChangedError();
   }
 }

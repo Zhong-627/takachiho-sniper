@@ -1,8 +1,8 @@
 # 高千穗峽划船預約工具
 
-在 macOS Apple Silicon 上執行的 TypeScript／Playwright CLI，使用真正的 Chrome 或 Chromium 操作 [EIPrO 官方網站](https://eipro.jp/takachiho1/)。目標乘船日為 **2026-10-26**，**10:00 與 10:30 是兩個獨立預約目標**。
+在 macOS Apple Silicon 上執行的 TypeScript／Playwright CLI，使用真正的 Chrome 或 Chromium 操作 [EIPrO 官方網站](https://eipro.jp/takachiho1/)。乘船日期、開賣時間、1–2 個獨立時段及各船個資都由 `config/config.local.json` 指定。範例目標為 **2026-10-26、10:00 與 10:30**。
 
-開放時間固定為 **2026-10-12 09:00:00 Asia/Tokyo = 2026-10-12 08:00:00 Asia/Taipei = 2026-10-12 00:00:00 UTC**。正式模式預先準備兩個獨立瀏覽器程序，各有自己的 BrowserContext；開放後各自查詢、選取、填寫客戶資料。一個時段失敗、變慢或成功，不會中止另一個。
+範例開放時間為 **2026-10-12 09:00:00 Asia/Tokyo = 2026-10-12 08:00:00 Asia/Taipei = 2026-10-12 00:00:00 UTC**；變更 local config 即可切換目標。正式模式為每個設定時段準備獨立瀏覽器程序與 BrowserContext，開放後各自查詢、選取、填寫客戶資料。使用兩時段時，一個失敗、變慢或成功，不會中止另一個。
 
 2026-10-08 已在 Cloud 透過官方正常 UI 暫留一次、進入一份真實客戶表單，確認 9 個客戶欄位及人數選項；沒有填入個資、勾同意、送出或付款。範例已包含這些實際 mappings。**這次不是執行本 repo 的 hold adapter，也不是 Mac Autofill 驗證**；仍需在 Mac 的受保護 full rehearsal 中確認目前表單並實測填寫。真站範圍見 [REAL_SITE.md](docs/REAL_SITE.md)、[10/8 表單勘查](docs/FORM_20261008.md)，離線驗證見 [VALIDATION.md](docs/VALIDATION.md)。
 
@@ -22,14 +22,37 @@ npm run check
 
 `npm run setup` 一次完成鎖定版本相依套件安裝、Playwright Chromium 下載及 TypeScript 編譯。預設 `browser.channel: "chromium"` 可直接執行；使用已安裝的 Chrome 時可改成 `"chrome"`。先確認 `node -p process.arch` 顯示 `arm64`。本工具不代替 macOS 系統時間同步。
 
+## 更改預約日期與時間
+
+在 Mac 執行 `open -e config/config.local.json`。以下是需合併到原檔的設定片段，保留既有 browser、customers、mappings 等設定；日期與開賣時間僅作格式示意，請依官方當次規則核對：
+
+```json
+{
+  "targetDate": "2026-10-27",
+  "releaseAt": "2026-10-13T08:00:00+08:00",
+  "slots": ["11:00", "11:30"]
+}
+```
+
+| 設定 | 意義與要求 |
+| --- | --- |
+| `targetDate` | 日本當地的乘船日期，必填 `YYYY-MM-DD` |
+| `releaseAt` | 開賣的絕對時間，必填含時區的 ISO 字串；台北用 `+08:00`、日本用 `+09:00`，也可用 UTC `Z` |
+| `slots` | 1–2 個不同的日本當地乘船時間，必填兩位數 `HH:mm`，須為官方實際提供的時段 |
+| `customers[時段]` | 各船對應的代表人、9 個 fields 與 mappings；key 必須與該 slot 完全相同 |
+
+例如把原 `customers["10:00"]`、`customers["10:30"]` 的 key 改為 `"11:00"`、`"11:30"`，保留各船自己的個資與已確認的 mappings。只預約一艘時，slots 可為 `["11:00"]`；未列入 slots 的客戶設定不會啟動預約。程式不自動推算開賣日，也不因時間格式合法就認定網站有該時段，仍須核對官方 availability。漏填日期、開賣時間或 slots 會報錯，不會使用舊目標。
+
+儲存後執行 `npm run doctor`，核對輸出的 targetDate、slots 及台北／日本開賣時間；缺少近期 Autofill receipt 時仍會提示尚未具備 live readiness。正式 `live` 的目標全部取自設定檔，不接受 `--date`／`--slot` 覆寫。執行中 `f` 只可重新載入個資及 mappings；若日期、開賣時間或 slots 已變更，會停止填寫並保留原頁，先確認既有 hold 狀態再另行啟動。
+
 ## 模式與命令
 
 | 模式 | 用途 | 可建立 hold | 必要確認 |
 | --- | --- | --- | --- |
-| `inspect` | 真站日曆、日期、兩時段、DOM、網路、session、畫面診斷 | 否 | 無 |
-| `rehearsal` | 真站兩時段並行讀取，顯示將採用的 reservation action | 否 | 無 |
+| `inspect` | 真站日曆、日期、設定時段、DOM、網路、session、畫面診斷 | 否 | 無 |
+| `rehearsal` | 真站設定時段獨立讀取，顯示將採用的 reservation action | 否 | 無 |
 | `full-rehearsal` | 真站選取單一可預約時段、客戶頁檢查、Autofill 驗證 | 是，一次 | `--slot`、`--confirm-reservation-side-effects` |
-| `live` | 在固定開放時間啟動兩個獨立 reservation flow | 是，每時段最多一次 | `--confirm-reservation-side-effects`、已驗證欄位 mapping |
+| `live` | 在設定開賣時間啟動 1–2 個獨立 reservation flow | 是，每時段最多一次 | `--confirm-reservation-side-effects`、已驗證欄位 mapping |
 
 ```bash
 npm run doctor
@@ -39,23 +62,23 @@ npm run full-rehearsal -- --slot 10:00 --date YYYY-MM-DD --confirm-reservation-s
 npm run live -- --confirm-reservation-side-effects
 ```
 
-`YYYY-MM-DD` 請換成從 inspect 確認、目前已開放且有餘位的日期。full rehearsal **真的會占用一個時段**，只能在有此意圖時執行。目標 2026-10-26 在 10 月 12 日開放前沒有可執行的 hold，不能用這個未開放日期驗證客戶表單。
+`YYYY-MM-DD` 請換成從 inspect 確認、目前已開放且有餘位的日期，`--slot` 改成 slots 中其中一個時間。full rehearsal **真的會占用一個時段**，只能在有此意圖時執行。範例目標 2026-10-26 在 10 月 12 日開放前沒有可執行的 hold，不能用這個未開放日期驗證客戶表單。
 
-所有命令預設讀取 `config/config.local.json`，也接受 `--config <本機 JSON 路徑>`。`inspect`、`rehearsal`、`full-rehearsal` 可用 `--date`；`live` 固定使用上述日期、開放時間及兩個時段。安全模式可加 `--headless` 或 `--close`，供非互動診斷使用；有 side effect 的模式必須保留可見瀏覽器。
+所有命令預設讀取 `config/config.local.json`，也接受 `--config <本機 JSON 路徑>`。`inspect`、`rehearsal`、`full-rehearsal` 可用 `--date`；`live` 完整使用 local config 的日期、開賣時間及時段。安全模式可加 `--headless` 或 `--close`，供非互動診斷使用；有 side effect 的模式必須保留可見瀏覽器。
 
 預設保持瀏覽器開啟，CLI 終端可輸入：
 
 | 命令 | 行為 |
 | --- | --- |
-| `f [10:00或10:30]` | 在目前已 hold 的客戶頁重新載入本機設定並填寫／驗證；不再選取時段。省略時段會處理所有已結束的 flow |
-| `handoff [10:00或10:30]` | 僅在已授權 reservation 模式把已 hold 的流程交由使用者操作，停止自動化並移除 HTTP 防護。省略時段會處理所有可交接的 flow |
+| `f [HH:mm]` | 在目前已 hold 的客戶頁重新載入本機設定並填寫／驗證；不再選取時段。省略時段會處理所有已結束的 flow |
+| `handoff [HH:mm]` | 僅在已授權 reservation 模式把已 hold 的流程交由使用者操作，停止自動化並移除 HTTP 防護。省略時段會處理所有可交接的 flow |
 | `q` | 關閉瀏覽器並離開；關閉不代表立即取消伺服器 hold |
 
 安全模式不提供 `handoff`，其網路防護持續有效。人工接手後，由使用者自己操作最後確認、信用卡、OTP、CAPTCHA 與 3D Secure；程式不提交預約或付款，不輸入安全驗證資訊。
 
 ## 第一輪真站演練
 
-先執行 `npm run inspect`，查看日曆、目標日期與兩個時段是否被識別，並確認診斷沒有未處理的封鎖、CAPTCHA、維護或頁面異動。再執行 `npm run rehearsal -- --attempts 3`。此時目標日尚未開放，看到 `unavailable` 或預約未開始是合理結果；**剩餘船數不等於可預約**。
+先執行 `npm run inspect`，查看日曆、設定日期與各時段是否被識別，並確認診斷沒有未處理的封鎖、CAPTCHA、維護或頁面異動。再執行 `npm run rehearsal -- --attempts 3`。若目標日尚未開放，看到 `unavailable` 或預約未開始是合理結果；**剩餘船數不等於可預約**。
 
 若要驗證「目前可預約時段會如何選取」，先以 `inspect -- --date YYYY-MM-DD` 檢查已開放日期，再用相同日期執行 `rehearsal`。安全演練只列出正式流程會發出的 action，永遠不點選建立 hold。
 
@@ -63,7 +86,7 @@ npm run live -- --confirm-reservation-side-effects
 
 ## 本機個資與 Autofill
 
-所有個資只放在 `config/config.local.json` 的 `customers`，兩個 slot 各自一組資料。`representativeName` 是該船的實際代表人；官方頁面表示同一代表人不可同時預約多艘船，所以兩組必須是不同代表人。程式會在 side effect 前檢查，不會把代表人記入 log。
+所有個資只放在 `config/config.local.json` 的 `customers`，每個設定 slot 各自一組資料。`representativeName` 是該船的實際代表人；官方頁面表示同一代表人不可同時預約多艘船，所以兩組必須是不同代表人。程式會在 side effect 前檢查，不會把代表人記入 log。
 
 clone 到 Mac 後，於專案目錄建立並開啟本機設定：
 
@@ -72,7 +95,7 @@ cp config/config.example.json config/config.local.json
 open -e config/config.local.json
 ```
 
-已有 local config 時不要再次複製覆寫。使用 VS Code 也可執行 `code config/config.local.json`。只編輯 local 檔的 `customers["10:00"]`、`customers["10:30"]`；不要把個資填進會提交的 example。兩組各填 `representativeName` 與下列 `fields`，已提供的 mappings 先保留，Mac 當次 DOM 不一致時停止並重新核對。
+已有 local config 時不要再次複製覆寫。使用 VS Code 也可執行 `code config/config.local.json`。個資填在 local 檔的 `customers[時段]`；範例為 `customers["10:00"]`、`customers["10:30"]`，改時段時同步改 key。不要把個資填進會提交的 example。每船各填 `representativeName` 與下列 `fields`，已提供的 mappings 先保留，Mac 當次 DOM 不一致時停止並重新核對。
 
 | fields key | 本機填入的資料 |
 | --- | --- |
@@ -90,7 +113,7 @@ open -e config/config.local.json
 
 首次 full rehearsal 可先只設定代表人，將 fields 與 mappings 明確改為空的 `{}`／`[]`，以便只檢查表單；或先在 local config 填妥 9 個欄位，使用已觀察的 mappings。工具輸出可見欄位、labelSource、id、name、HTML 限制、選項及唯一 selector，不擷取欄位值。`htmlRequired` 是原始 DOM 值，`required`／`requiredSources` 另含可見必填標記與已確認的本機要求，避免官方 required=false 造成漏填。片假名依「全部資訊」說明採保守非空檢查，不宣稱伺服器一定必填。
 
-檢查 `form-1000.json`／`form-1030.json` 後，在同一客戶頁修改 local config，於 CLI 輸入 `f`；不重新 hold。工具先驗證所有 mappings，付款、規約、未知用途仍不自動操作，逐欄比對值、檢查非空及 HTML validity。這些檢查不是送出後的伺服器驗證，也未證明生日或海外資料格式會被接受。
+檢查 `form-HHmm.json`（例如 `form-1000.json`）後，在同一客戶頁修改 local config 的個資／mappings，於 CLI 輸入 `f`；不重新 hold。工具先驗證所有 mappings，付款、規約、未知用途仍不自動操作，逐欄比對值、檢查非空及 HTML validity。這些檢查不是送出後的伺服器驗證，也未證明生日或海外資料格式會被接受。
 
 客戶欄位驗證通過後會建立 `.local/form-verification.json`，供 live 預檢核對 mapping。receipt v2 簽章包含驗證規則版本、mapping 定義與欄位 key；沒有姓名或其他個資，也不雜湊個資值。v1 舊紀錄失效，不能沿用或手寫新紀錄。若兩時段已確認使用相同表單及 mapping，這份驗證可供兩組不同客戶資料使用；實際值仍須各自正確。驗證須在 live 前 7 天內完成，修改 mapping 或欄位 keys 後須重新驗證。receipt 不保證網站往後不變，live 仍會重新檢查目前 DOM、必要欄位及填寫結果。
 
@@ -100,13 +123,13 @@ open -e config/config.local.json
 
 ## 正式執行
 
-10 月 12 日開放前確認 Mac 時間自動同步、接上電源、網路穩定，且 doctor、演練及 Autofill 驗證都通過。保持終端與 Chrome 開啟，建議提前數分鐘執行：
+設定開賣時間前確認 Mac 時間自動同步、接上電源、網路穩定，且 doctor、演練及 Autofill 驗證都通過。保持終端與 Chrome 開啟，建議提前數分鐘執行：
 
 ```bash
 caffeinate -dimsu npm run live -- --confirm-reservation-side-effects
 ```
 
-程式按 `warmupSeconds` 提前準備頁面，預設 120 秒；到固定開放時間後，兩個 context 分別重新檢查自己的時段，依官方當前可預約資料建立一次性 hold action。10:00 慢 request 不會阻塞 10:30。每個 slot 一旦開始 hold，就停止該 slot 的 polling；即使回應逾時也不重複 hold，避免不確定結果導致重複占用。另一個 slot 繼續。
+程式按 `warmupSeconds` 提前準備頁面，預設 120 秒；到設定開賣時間後，各 context 分別重新檢查自己的時段，依官方當前可預約資料建立一次性 hold action。兩時段時，一個慢 request 不會阻塞另一個。每個 slot 一旦開始 hold，就停止該 slot 的 polling；即使回應逾時也不重複 hold，避免不確定結果導致重複占用。另一個 slot 繼續。
 
 官方公開說明的 hold 為 **15 分鐘**，以伺服器規則為準。取得後立即檢查客戶頁與 Autofill，保留兩個流程；不要在兩頁使用瀏覽器返回／重新載入來重新選船。最後輸入 `handoff`，自行完成需要的後續流程。若只有其中一個成功，成功頁仍會保留。
 
@@ -124,7 +147,7 @@ caffeinate -dimsu npm run live -- --confirm-reservation-side-effects
 
 ## Logs、畫面與診斷
 
-每次執行在 `artifacts/` 建立獨立目錄。JSONL log 記錄 UTC、JST、台北時間、monotonic elapsed ms、navigation／request latency、HTTP status、redirect、availability、retry、reservation action、customer form、Autofill 與錯誤。slot 事件明確標示 `10:00` 或 `10:30`，可比較各流程與開放瞬間的時間差。
+每次執行在 `artifacts/` 建立獨立目錄。JSONL log 記錄 UTC、JST、台北時間、monotonic elapsed ms、navigation／request latency、HTTP status、redirect、availability、retry、reservation action、customer form、Autofill 與錯誤。slot 事件明確標示設定的 `HH:mm`，可比較各流程與開放瞬間的時間差。
 
 診斷包含 DOM metadata、當前時段資訊、navigation timing、Cookie／session metadata 及 screenshots；不輸出 Cookie 值、action token、POST body 或個資。客戶頁 screenshots 會遮蔽輸入欄位；人工填寫與官方頁面仍可能顯示其他敏感資訊，分享前須人工檢查。工具不保存 storageState、HAR、Playwright trace 或完整客戶頁 HTML。
 

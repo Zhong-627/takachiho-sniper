@@ -2,6 +2,8 @@ import { existsSync } from 'node:fs';
 import { chromium, type APIResponse, type Browser, type BrowserContext, type Page, type Route } from 'playwright';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { autofillCustomer } from '../src/autofill.js';
+import { parseConfig, validateModeConfig } from '../src/config.js';
+import { runIndependentSlots } from '../src/scheduler.js';
 import { SafetyGuard, type GuardDecision, type RunMode } from '../src/safety.js';
 import { CUSTOMER_PATH, EIPRO_ORIGIN, EIPRO_READ_RULES, HOLD_PATH } from '../src/site-rules.js';
 import {
@@ -31,20 +33,19 @@ const customerHtml = `<!doctype html><title>Fixture customer</title><h1>Customer
     <button type="submit">Confirm payment</button>
   </form>`;
 
-function calendarHtml(state: Pick<Fixture, 'initialCaptcha' | 'skipRender' | 'renderDelayMs' | 'navigationDelayMs' | 'initialViewErrors' | 'backgroundClassName'>): string {
+function calendarHtml(state: Pick<Fixture, 'initialCaptcha' | 'skipRender' | 'renderDelayMs' | 'navigationDelayMs' | 'initialViewErrors' | 'backgroundClassName' | 'events'>): string {
   return `<!doctype html><title>Fixture calendar</title>
     ${state.initialCaptcha ? '<div class="captcha-challenge">Synthetic challenge</div>' : ''}
     <form id="mainForm">
     <div class="fullcalendar_control_bar" data-target_selector="#service-full-calendar.fullcalendar_fixture" style="width:100%;height:0;overflow:visible">
       <button data-target_view_name="agendaDay" id="day" style="float:left">Day</button>
       <select class="fullcalendar_control_date_list" id="date" style="float:left">
-        <option value="2026/10/07">2026/10/07</option><option value="2026/10/26">2026/10/26</option>
+        <option value="2026/10/07">2026/10/07</option>${[...new Set(state.events.map((event) => event.service_start_datetime.slice(0, 10)))].map((date) => `<option value="${date}">${date}</option>`).join('')}
       </select>
     </div>
     <div id="service-full-calendar" class="fullcalendar_fixture" style="min-height:200px"></div>
     </form>
     <script>
-      const fixtureEvents = ${JSON.stringify(fixtureEvents)};
       let view = 'month', date = '2026-10-07', events = [];
       let initialViewErrors = ${JSON.stringify(state.initialViewErrors)};
       async function readCalendar() {
@@ -110,6 +111,7 @@ function calendarHtml(state: Pick<Fixture, 'initialCaptcha' | 'skipRender' | 're
 }
 
 interface Fixture {
+  events: SiteEvent[];
   context: BrowserContext;
   page: Page;
   guard: SafetyGuard;
@@ -133,6 +135,7 @@ async function fixture(browser: Browser, mode: RunMode): Promise<Fixture> {
     onDecision: (decision) => { latestDecision = decision; },
   });
   const state: Fixture = {
+    events: fixtureEvents,
     context, page: await context.newPage(), guard, requests: [], searchStatus: 200, holdResult: '1',
     initialCaptcha: false, skipRender: false, renderDelayMs: 100,
     navigationDelayMs: 10,
@@ -157,7 +160,7 @@ async function fixture(browser: Browser, mode: RunMode): Promise<Fixture> {
       fetch: async () => {
         capture();
         const status = pathname === SEARCH_PATH ? state.searchStatus : 200;
-        const payload = pathname === SEARCH_PATH ? { results: fixtureEvents, errors: [] } : { data: { result: state.holdResult } };
+        const payload = pathname === SEARCH_PATH ? { results: state.events, errors: [] } : { data: { result: state.holdResult } };
         const body = pathname === new URL(CALENDAR_URL).pathname ? calendarHtml(state)
           : pathname === CUSTOMER_PATH ? customerHtml : JSON.stringify(payload);
         const headers = { 'content-type': pathname === SEARCH_PATH || pathname === HOLD_PATH ? 'application/json' : 'text/html', 'retry-after': '2' };
@@ -234,6 +237,43 @@ describe.runIf(executable !== undefined)('offline browser adapter fixtures', () 
       expect(state.requests.filter((request) => request.pathname === CUSTOMER_PATH && request.method !== 'GET')).toHaveLength(0);
       await expect(performReservation(state.page, fixtureEvents[0]!, state.guard, timeouts, vi.fn())).rejects.toThrow(/already dispatched/u);
     } finally { await state.context.close(); }
+  });
+
+  it('uses a different configured date and two arbitrary slots with their own customer data', async () => {
+    const config = parseConfig({ targetDate: '2026-11-03', releaseAt: '2026-10-20T08:00:00+08:00', slots: ['09:15', '11:45'],
+      customers: Object.fromEntries(['09:15', '11:45'].map((slot, index) => [slot, {
+        representativeName: `Synthetic Person ${index}`,
+        fields: { representativeName: `Synthetic Person ${index}`, email: `fixture-${index}@example.invalid` },
+        mappings: [{ key: 'representativeName', selector: 'input#fixture-name' }, { key: 'email', selector: 'input#fixture-email' }],
+      }])),
+    });
+    validateModeConfig(config, 'live', true);
+    const events = config.slots.map((slot, index): SiteEvent => ({ ...fixtureEvents[index]!,
+      service_start_datetime: `${config.targetDate.replaceAll('-', '/')} ${slot}:00`,
+      service_end_datetime: `${config.targetDate.replaceAll('-', '/')} ${index === 0 ? '09:45' : '12:15'}:00`,
+    }));
+    const results = await runIndependentSlots(config.slots, async (slot) => {
+      const state = await fixture(browser, 'live');
+      state.events = events;
+      try {
+        await openCalendar(state.page, config.targetDate, config.timeouts, vi.fn());
+        const observation = await probeAvailability(state.page, config.targetDate, slot, config.timeouts, vi.fn());
+        expect(observation.status).toBe('available');
+        const result = await performReservation(state.page, observation.event!, state.guard, config.timeouts, vi.fn());
+        expect(result.plan.slotKey).toBe(`${config.targetDate} ${slot}`);
+        const customer = config.customers[slot]!;
+        expect((await autofillCustomer(state.page, customer)).customerFieldsVerified).toBe(true);
+        expect(await state.page.locator('#fixture-name').inputValue()).toBe(customer.representativeName);
+        expect(await state.page.locator('#fixture-email').inputValue()).toBe(customer.fields.email);
+        expect(await state.page.locator('#fixture-card').inputValue()).toBe('');
+        expect(await state.page.locator('#fixture-otp').inputValue()).toBe('');
+        expect(state.requests.filter((request) => request.pathname === HOLD_PATH && request.decision.allowed)).toHaveLength(1);
+        expect(state.requests.filter((request) => request.pathname === CUSTOMER_PATH && request.method !== 'GET')).toHaveLength(0);
+        await expect(performReservation(state.page, observation.event!, state.guard, config.timeouts, vi.fn())).rejects.toThrow(/already dispatched/u);
+        return slot;
+      } finally { await state.context.close(); }
+    });
+    expect(results).toEqual(config.slots.map((slot) => ({ status: 'fulfilled', value: slot })));
   });
 
   it('propagates server Retry-After on HTTP 429 without reservation requests', async () => {
