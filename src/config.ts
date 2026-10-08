@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { z } from 'zod';
+import { OBSERVED_CUSTOMER_FIELDS, observedSelector } from './observed-form.js';
 
 export type RunMode = 'inspect' | 'rehearsal' | 'full-rehearsal' | 'live';
 export const DEFAULT_CONFIG_PATH = 'config/config.local.json';
@@ -125,9 +126,20 @@ export function validateModeConfig(
     const customer = config.customers[slot];
     if (!customer) continue;
     if (mode === 'live' || customer.mappings.length > 0) {
-      if (customer.fields.representativeName !== customer.representativeName
-          || !customer.mappings.some((mapping) => mapping.key === 'representativeName' && (!mapping.kind || mapping.kind === 'fill'))) {
-        throw new Error('Configured autofill requires a representativeName mapping whose field value equals that slot representativeName.');
+      const fullNameMatches = customer.fields.representativeName === customer.representativeName
+        && customer.mappings.some((mapping) => mapping.key === 'representativeName' && (!mapping.kind || mapping.kind === 'fill'));
+      const splitNameMatches = ['familyName', 'givenName'].every((key) => {
+        const field = OBSERVED_CUSTOMER_FIELDS.find((item) => item.key === key);
+        return field && customer.fields[key]?.trim() && customer.mappings.some((mapping) =>
+          mapping.key === key && mapping.selector === observedSelector(field) && (!mapping.kind || mapping.kind === 'fill'));
+      });
+      const normalizedName = (value: string): string => value.normalize('NFKC').replace(/\s+/gu, '').toLocaleLowerCase('en-US');
+      const splitValues = [customer.fields.familyName ?? '', customer.fields.givenName ?? ''];
+      const splitIdentityMatches = splitNameMatches && [splitValues.join(''), [...splitValues].reverse().join('')]
+        .some((name) => normalizedName(name) === normalizedName(customer.representativeName));
+      const hasSplitMapping = customer.mappings.some((mapping) => ['familyName', 'givenName'].includes(mapping.key));
+      if ((hasSplitMapping && !splitIdentityMatches) || (!fullNameMatches && !splitIdentityMatches)) {
+        throw new Error('Configured autofill requires a representativeName mapping whose field value equals that slot representativeName, or observed familyName/givenName mappings identifying the same representative.');
       }
     }
     if (mode === 'live' && customer.mappings.some((mapping) => !customer.fields[mapping.key])) {

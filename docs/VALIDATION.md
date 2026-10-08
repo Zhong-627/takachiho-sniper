@@ -12,6 +12,21 @@
 
 自動化檢查：`npm run check` 執行 typecheck、lint、159 項 Vitest 測試，全部通過；`npm run build` 驗證可產出執行檔。瀏覽器測試使用 localhost 或攔截的官方形狀 fixture，涵蓋一次性 hold 成功證明、客戶 Autofill、信用卡／OTP 保持空白、安全模式意外呼叫仍被阻擋、redirect、429、未知 availability、時間、獨立並行及 receipt。
 
-真實 hold、Customer Information DOM、付款及 3D Secure **沒有在 Cloud 執行**。自動審查曾拒絕真實時段點擊，因為選擇可能扣減名額；後续確認採用公開 JavaScript 與零 hold 的頁面讀取。Mac 需依 [檢查清單](MAC_CHECKLIST.md) 用帶明確確認旗標的 full-rehearsal 確認实际表單、額外 assets 及 Autofill。若客戶頁有尚未驗證的資源，guard 會阻擋並留下診斷；先人工檢查其精確路徑與來源，不能擴大為任意 GET allowlist。
+上述 10/7 run 沒有真實 hold 或客戶頁。當日自動審查曾拒絕真實時段點擊，後續使用公開 source 與零 hold 讀取；這是歷史紀錄，不是 10/8 UI 勘查的結果。Mac 仍需依 [檢查清單](MAC_CHECKLIST.md) 驗證 repo adapter、當次表單、額外資源及 Autofill，未知資源不能擴大成任意 GET allowlist。
 
 GitHub 推送目標已指定為 [Zhong-627/takachiho-sniper](https://github.com/Zhong-627/takachiho-sniper)。GitHub Actions workflow 已建立，測試階段只有 loopback 網路。上述通過紀錄來自本機 Cloud 驗證，尚未確認 GitHub Actions 執行結果；推送後請在 repository 的 [Actions 頁面](https://github.com/Zhong-627/takachiho-sniper/actions) 檢查狀態。專案附鎖定相依套件、CI、文件及 Git history，可依 README 從 GitHub clone。
+
+## 2026-10-08 更新範圍
+
+另一次已授權 Cloud 官方 UI 勘查成功暫留 1 艘並讀取表單，詳見 [紀錄](FORM_20261008.md)。未執行本 repo adapter、填入個資、勾同意、提交或付款。沒有 Mac Autofill／receipt，不能把 UI 成功計作軟體已實測成功。
+
+新增 `observed-form` 契約、9 欄 mappings、必要欄位來源、姓／名與代表人一致性、三個 dummy checkbox 人工防護及 receipt v2。離線 fixture 從去除個資的 metadata 重建，不保存完整真站 HTML，也未模擬未知生日格式化或伺服器驗證。程式不放寬未知欄位、付款或額外資源 allowlist；正式 adapter 與 polling 行為維持原設計。
+
+2026-10-08 Linux x64／Node.js 24.19.0，最後一次 `npm run check` 的 typecheck、lint 與 **185 項測試（13 個 suites）全部通過，無跳過**；另執行 `npm run build`。本機 full Chromium 初次啟動被環境的 Unix socket 權限拒絕，改用同版 Playwright Chromium Headless Shell 141 執行完整離線測試，沒有修改 Mac browser 設定或降低 guard。重現 Cloud 檢查的環境變數如下，Mac 正常安裝不需這個路徑：
+
+```bash
+PLAYWRIGHT_EXECUTABLE_PATH=/root/.cache/ms-playwright/chromium_headless_shell-1194/chrome-linux/headless_shell npm run check
+npm run build
+```
+
+新增 25 項表單測試及 1 項 receipt 版本測試；涵蓋 raw required=false、9 個值非空、地址／人數 mapping 缺漏、消失／改型／唯讀／重複 control、付款語義優先、三個確認保持人工、精確人數 value、HTML 限制 metadata、姓／名與代表人一致性、舊 receipt 失效。所有新增填寫使用假資料與本機 HTML；沒有再向 EIPrO 建立 hold 或生成真實本機 receipt。本紀錄不等於 GitHub Actions 已通過，CI 以提交後實際狀態為準。

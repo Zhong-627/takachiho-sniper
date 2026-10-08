@@ -19,6 +19,8 @@ npm run doctor
 - [ ] 開啟 macOS「日期與時間」自動設定時間，確認系統時鐘與可靠來源一致。
 - [ ] 個資只在 `config/config.local.json`；`git status --short` 沒有出現此檔或 `.local/`／`artifacts/`。
 
+clone 後以 `open -e config/config.local.json` 或 `code config/config.local.json` 編輯。填 `customers["10:00"]` 與 `customers["10:30"]` 各自的 `representativeName` 及 9 個 fields，兩船代表人不同；姓／名合併須與頂層代表人一致。範例已帶 10/8 觀察的 mappings，個資值都是空白。已有 local config 時不要用 cp 覆寫，手動合併新欄位與 mappings。細節見 [README 本機設定](../README.md#本機個資與-autofill) 與 [表單勘查](FORM_20261008.md)。
+
 初次 doctor 可能提示還沒有 customer mappings／full rehearsal receipt。這表示尚未具備 live readiness，先完成以下真站流程。
 
 ## 2. 無 side effect 的真站 inspect
@@ -59,7 +61,7 @@ npm run rehearsal -- --date YYYY-MM-DD --attempts 3
 
 **這一步會真的占用一艘船，通常約 15 分鐘。** 選擇你確實有意驗證的一個目前可預約時段；日／時間先用安全 inspect 確認。工具接受 10:00 或 10:30，full rehearsal 每次只處理一個。
 
-1. 在 local config 為該 slot 填入真實 `representativeName`。首次可讓 fields／mappings 保持空。
+1. 在 local config 為該 slot 填入真實 `representativeName` 與 9 個 fields。若這次僅要 discovery，將 fields／mappings 明確設為 `{}`／`[]`，保留頂層代表人；不是把空白資料當作已驗證填寫。
 2. 執行：
 
    ```bash
@@ -67,10 +69,10 @@ npm run rehearsal -- --date YYYY-MM-DD --attempts 3
    ```
 
 3. 確認只有一次 hold request；成功才導向 `orders/add`。若 timeout／結果不確定，先人工檢查原頁，**不要重新執行來重試 hold**。
-4. 檢查客戶頁 `form-1000.json`／`form-1030.json` schema。確認網站實際要求的姓名、フリガナ、Email、電話、人數及其它欄位。記錄提供的唯一 selector、select 的 optionValue 與 required，避免猜測。
-5. 在本機設定新增 `fields` 與 `mappings`，輸入值及 DOM 已確認的 selector。設定 `select` 需使用實際 option value，不能只填顯示文字。check mapping 使用 `"true"`／`"false"` 字串，且不可用於同意規約／最後確認。
+4. 檢查客戶頁 `form-1000.json`／`form-1030.json` schema，比對 10/8 的姓／名、片假名姓／名、Email、電話、地址、生日、人數與當次 DOM。`htmlRequired=false` 不代表可不填；檢查 `requiredSources`、missingObservedFields 與 HTML 限制。只有一份 08:30 表單曾勘查，10:00／10:30 是否相同仍須確認。
+5. 在 local config 使用當次確認的 `fields`／`mappings` 與自己的資料。人數 select 使用真實 option value；不要自動 check 三項確認或付款。生日格式、輸入後格式化、台灣電話／海外地址接受方式與片假名需要實測；沒有提交伺服器前不能宣稱伺服器驗證已通過。
 6. 保持同一客戶頁，於 CLI 終端輸入 `f` 重新載入設定及驗證；它不會重新 hold。
-7. 確認 customerFieldsVerified、必要客戶欄位及 HTML validity 通過，`.local/form-verification.json` 已更新。
+7. 確認 customerFieldsVerified、9 個必要客戶欄位非空、當次選項及 HTML validity 通過，`.local/form-verification.json` v2 已由程式更新。v1 舊紀錄不能沿用，也不能因 Cloud 勘查或離線 fixture 測試手寫 receipt。
 8. 如果兩時段的表單相同，把已驗證的 mappings 複製至另一個 slot，但填入該船不同代表人的實際資料。若表單不同，需要各自驗證。
 
 - [ ] 目前 customer DOM 能辨識，所有必要欄位都清楚。

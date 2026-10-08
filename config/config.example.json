@@ -1,14 +1,148 @@
 {
   "targetDate": "2026-10-26",
   "releaseAt": "2026-10-12T09:00:00+09:00",
-  "slots": ["10:00", "10:30"],
-  "browser": { "channel": "chromium", "headless": false },
-  "polling": { "maxAttempts": 80, "baseDelayMs": 1250, "maxDelayMs": 20000 },
-  "timeouts": { "navigationMs": 30000, "actionMs": 10000, "customerFormMs": 30000 },
+  "slots": [
+    "10:00",
+    "10:30"
+  ],
+  "browser": {
+    "channel": "chromium",
+    "headless": false
+  },
+  "polling": {
+    "maxAttempts": 80,
+    "baseDelayMs": 1250,
+    "maxDelayMs": 20000
+  },
+  "timeouts": {
+    "navigationMs": 30000,
+    "actionMs": 10000,
+    "customerFormMs": 30000
+  },
   "warmupSeconds": 120,
   "artifactsDir": "artifacts",
   "customers": {
-    "10:00": { "representativeName": "", "fields": { "representativeName": "" }, "mappings": [] },
-    "10:30": { "representativeName": "", "fields": { "representativeName": "" }, "mappings": [] }
+    "10:00": {
+      "representativeName": "",
+      "fields": {
+        "familyName": "",
+        "givenName": "",
+        "familyNameKana": "",
+        "givenNameKana": "",
+        "email": "",
+        "mobilePhone": "",
+        "address": "",
+        "birthDate": "",
+        "passengerComposition": ""
+      },
+      "mappings": [
+        {
+          "key": "familyName",
+          "selector": "input[name=\"data[Customer][l_name]\"]",
+          "kind": "fill"
+        },
+        {
+          "key": "givenName",
+          "selector": "input[name=\"data[Customer][f_name]\"]",
+          "kind": "fill"
+        },
+        {
+          "key": "familyNameKana",
+          "selector": "input[name=\"data[Customer][l_name_kana]\"]",
+          "kind": "fill"
+        },
+        {
+          "key": "givenNameKana",
+          "selector": "input[name=\"data[Customer][f_name_kana]\"]",
+          "kind": "fill"
+        },
+        {
+          "key": "email",
+          "selector": "input[name=\"data[Customer][mail]\"]",
+          "kind": "fill"
+        },
+        {
+          "key": "mobilePhone",
+          "selector": "input[name=\"data[Customer][mobile_tel]\"]",
+          "kind": "fill"
+        },
+        {
+          "key": "address",
+          "selector": "input[name=\"data[CustomerQuestionAnswer][4][answer]\"]",
+          "kind": "fill"
+        },
+        {
+          "key": "birthDate",
+          "selector": "input[name=\"data[Customer][birth_date]\"]",
+          "kind": "fill"
+        },
+        {
+          "key": "passengerComposition",
+          "selector": "select[name=\"data[CustomerQuestionAnswer][6][answer]\"]",
+          "kind": "select"
+        }
+      ]
+    },
+    "10:30": {
+      "representativeName": "",
+      "fields": {
+        "familyName": "",
+        "givenName": "",
+        "familyNameKana": "",
+        "givenNameKana": "",
+        "email": "",
+        "mobilePhone": "",
+        "address": "",
+        "birthDate": "",
+        "passengerComposition": ""
+      },
+      "mappings": [
+        {
+          "key": "familyName",
+          "selector": "input[name=\"data[Customer][l_name]\"]",
+          "kind": "fill"
+        },
+        {
+          "key": "givenName",
+          "selector": "input[name=\"data[Customer][f_name]\"]",
+          "kind": "fill"
+        },
+        {
+          "key": "familyNameKana",
+          "selector": "input[name=\"data[Customer][l_name_kana]\"]",
+          "kind": "fill"
+        },
+        {
+          "key": "givenNameKana",
+          "selector": "input[name=\"data[Customer][f_name_kana]\"]",
+          "kind": "fill"
+        },
+        {
+          "key": "email",
+          "selector": "input[name=\"data[Customer][mail]\"]",
+          "kind": "fill"
+        },
+        {
+          "key": "mobilePhone",
+          "selector": "input[name=\"data[Customer][mobile_tel]\"]",
+          "kind": "fill"
+        },
+        {
+          "key": "address",
+          "selector": "input[name=\"data[CustomerQuestionAnswer][4][answer]\"]",
+          "kind": "fill"
+        },
+        {
+          "key": "birthDate",
+          "selector": "input[name=\"data[Customer][birth_date]\"]",
+          "kind": "fill"
+        },
+        {
+          "key": "passengerComposition",
+          "selector": "select[name=\"data[CustomerQuestionAnswer][6][answer]\"]",
+          "kind": "select"
+        }
+      ]
+    }
   }
 }

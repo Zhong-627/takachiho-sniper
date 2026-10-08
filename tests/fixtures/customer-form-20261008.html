@@ -1,0 +1,36 @@
+<!doctype html><html lang="ja"><meta charset="utf-8"><title>Offline observed-form fixture</title><h1>予約入力</h1><p>全て必須項目です。全ての情報を入力してください。</p><form><div class="external-events3">
+<div class="s-12 l-3">合計請求金額</div><div class="s-12 l-9">
+<input name="data[OrderDetail][billing_price]" type="text" autocomplete="off" id="order_detail_total_billing" readonly>
+</div>
+<div class="s-12 l-3">＊代表者氏名：姓</div><div class="s-12 l-9">
+<input name="data[Customer][l_name]" type="text" autocomplete="off">
+</div>
+<div class="s-12 l-3">＊代表者氏名：名</div><div class="s-12 l-9">
+<input name="data[Customer][f_name]" type="text" autocomplete="off">
+</div>
+<div class="s-12 l-3">代表者フリガナ：セイ</div><div class="s-12 l-9">
+<input name="data[Customer][l_name_kana]" type="text" autocomplete="off">
+</div>
+<div class="s-12 l-3">代表者フリガナ：メイ</div><div class="s-12 l-9">
+<input name="data[Customer][f_name_kana]" type="text" autocomplete="off">
+</div>
+<div class="s-12 l-3">＊メールアドレス（Gmail推奨）</div><div class="s-12 l-9">
+<input name="data[Customer][mail]" type="email" autocomplete="off" title="『メールアドレス』の形式で入力ください。">
+</div>
+<div class="s-12 l-3">＊連絡先電話番号</div><div class="s-12 l-9">
+<input name="data[Customer][mobile_tel]" type="tel" autocomplete="off" title="『0～9』までの数値と『-』で入力ください。">
+</div>
+<div class="s-12 l-3">＊「都道府県、自宅住所」（Country of Citizenship）</div><div class="s-12 l-9">
+<input name="data[CustomerQuestionAnswer][4][answer]" type="text" autocomplete="off">
+</div>
+<div class="s-12 l-3">＊代表者生年月日</div><div class="s-12 l-9">
+<input name="data[Customer][birth_date]" type="text" autocomplete="off" inputmode="numeric" class="customer_setting_input_type_311_birth_date js-format--dateEx">
+</div>
+<div class="s-12 l-3">＊ご利用人数</div><div class="s-12 l-9">
+<select name="data[CustomerQuestionAnswer][6][answer]"><option value=""></option><option value="大人１名">大人１名</option><option value="大人２名">大人２名</option><option value="大人３名">大人３名</option><option value="大人１名、未就学児1名">大人１名、未就学児1名</option><option value="大人１名、未就学児２名">大人１名、未就学児２名</option><option value="大人１名、小学生１名">大人１名、小学生１名</option><option value="大人１名、小学生２名">大人１名、小学生２名</option><option value="大人１名、小学生１名、未就学児１名">大人１名、小学生１名、未就学児１名</option><option value="大人１名、小学生１名、未就学児２名">大人１名、小学生１名、未就学児２名</option><option value="大人１名、小学生２名、未就学児１名">大人１名、小学生２名、未就学児１名</option><option value="大人２名、未就学児１名">大人２名、未就学児１名</option><option value="大人２名、未就学児２名">大人２名、未就学児２名</option><option value="大人２名、小学生１名">大人２名、小学生１名</option><option value="大人２名、小学生１名、未就学児１名">大人２名、小学生１名、未就学児１名</option><option value="大人３名、未就学児１名">大人３名、未就学児１名</option></select>
+</div>
+<div class="s-12 l-3">＊「予約に関する確認事項」に同意しますか？</div><div class="s-12 l-9"><label><input id="manual-consent-0" type="checkbox" name="data[dummy]" value="「予約に関する確認事項」に同意します。">「予約に関する確認事項」に同意します。</label></div>
+<div class="s-12 l-3">＊「予約受付期間とキャンセル料」に同意しますか？</div><div class="s-12 l-9"><label><input id="manual-consent-1" type="checkbox" name="data[dummy]" value="「予約受付期間とキャンセル料について」に同意します。">「予約受付期間とキャンセル料について」に同意します。</label></div>
+<div class="s-12 l-3">＊「ボート利用に関する禁止事項・注意事項について」確認しましたか？</div><div class="s-12 l-9"><label><input id="manual-consent-2" type="checkbox" name="data[dummy]" value="「ボート利用に関する禁止事項・注意事項について」を確認しました。">「ボート利用に関する禁止事項・注意事項について」を確認しました。</label></div>
+<div class="s-12 l-3">＊支払方法</div><div class="s-12 l-9"><label><input type="radio" name="data[CustomerPaymentHistory][payment_type]" value="2" checked>クレジット決済</label><label for="fixture-credit-card">カード番号</label><input id="fixture-credit-card" name="credit_card_number"><label for="fixture-otp">3D Secure OTP</label><input id="fixture-otp" name="otp"></div>
+</div><input type="hidden" name="token" value="CONFIDENTIAL_FIXTURE_TOKEN"><button type="submit">入力確認</button></form></html>

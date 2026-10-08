@@ -4,7 +4,7 @@
 
 開放時間固定為 **2026-10-12 09:00:00 Asia/Tokyo = 2026-10-12 08:00:00 Asia/Taipei = 2026-10-12 00:00:00 UTC**。正式模式預先準備兩個獨立瀏覽器程序，各有自己的 BrowserContext；開放後各自查詢、選取、填寫客戶資料。一個時段失敗、變慢或成功，不會中止另一個。
 
-此版本可進入 Mac 真站演練。已在 Cloud 安全讀取公開日曆與官方 JavaScript，確認日期／時段／hold 呼叫結構；**尚未建立任何真實 hold，也未進入真實客戶資料頁**。客戶欄位必須先在 Mac 的受保護 full rehearsal 中檢查及驗證。真站確認範圍與限制見 [REAL_SITE.md](docs/REAL_SITE.md)，實際通過的測試與零 hold 真站演練見 [VALIDATION.md](docs/VALIDATION.md)。
+2026-10-08 已在 Cloud 透過官方正常 UI 暫留一次、進入一份真實客戶表單，確認 9 個客戶欄位及人數選項；沒有填入個資、勾同意、送出或付款。範例已包含這些實際 mappings。**這次不是執行本 repo 的 hold adapter，也不是 Mac Autofill 驗證**；仍需在 Mac 的受保護 full rehearsal 中確認目前表單並實測填寫。真站範圍見 [REAL_SITE.md](docs/REAL_SITE.md)、[10/8 表單勘查](docs/FORM_20261008.md)，離線驗證見 [VALIDATION.md](docs/VALIDATION.md)。
 
 ## Mac 安裝
 
@@ -65,11 +65,34 @@ npm run live -- --confirm-reservation-side-effects
 
 所有個資只放在 `config/config.local.json` 的 `customers`，兩個 slot 各自一組資料。`representativeName` 是該船的實際代表人；官方頁面表示同一代表人不可同時預約多艘船，所以兩組必須是不同代表人。程式會在 side effect 前檢查，不會把代表人記入 log。
 
-`fields` 保存你選擇的本機欄位 key 與值；`mappings` 將 key 對應到**真實客戶頁已檢查的唯一 selector**，可選 `kind: "fill" | "select" | "check"`。程式不提供猜測的姓名、フリガナ、Email、電話、人數 selector。
+clone 到 Mac 後，於專案目錄建立並開啟本機設定：
 
-首次 full rehearsal 可以先設定代表人，保持 `mappings` 為空。進入真實客戶頁後，工具輸出可見欄位的標籤、id、name、required、選項與唯一 selector，不擷取欄位值。用 `form-1000.json`／`form-1030.json` 診斷建立本機 mapping；在瀏覽器仍開啟的同一次流程中，修改 local config，再於終端輸入 `f`。工具先驗證每個 mapping，只填寫已識別的客戶欄位，逐欄比對值並檢查 HTML validity。
+```bash
+cp config/config.example.json config/config.local.json
+open -e config/config.local.json
+```
 
-客戶欄位驗證通過後會建立 `.local/form-verification.json`，供 live 預檢核對 mapping。receipt 記錄由 mapping 定義與欄位 key 計算的簽章及驗證時間，沒有姓名或其他個資，也不雜湊個資值；若兩時段使用相同 mapping，這份驗證可供兩組不同客戶資料使用。驗證須在 live 前 7 天內完成，修改 mapping 或欄位 keys 後須重新驗證。receipt 證明曾在真實表單驗證這組 mapping，不能保證網站往後不變；live 仍會重新檢查目前 DOM、必要欄位及填寫結果。
+已有 local config 時不要再次複製覆寫。使用 VS Code 也可執行 `code config/config.local.json`。只編輯 local 檔的 `customers["10:00"]`、`customers["10:30"]`；不要把個資填進會提交的 example。兩組各填 `representativeName` 與下列 `fields`，已提供的 mappings 先保留，Mac 當次 DOM 不一致時停止並重新核對。
+
+| fields key | 本機填入的資料 |
+| --- | --- |
+| `familyName`／`givenName` | 姓／名；合併後須與該組 `representativeName` 相符（忽略空白、全半形，接受姓前或名前） |
+| `familyNameKana`／`givenNameKana` | 姓／名的片假名 |
+| `email` | 可收確認信的 Email，官方建議 Gmail |
+| `mobilePhone` | 可即時聯繫的電話；台灣號碼格式待真站確認 |
+| `address` | 住家地址；海外填法待確認 |
+| `birthDate` | 代表人生日；精確輸入格式與網站格式化行為待 Mac 確認，不由程式猜測 |
+| `passengerComposition` | [勘查表](docs/FORM_20261008.md) 內完整日文 option value，例如 `大人２名、未就学児２名`；依該船實際組合選擇 |
+
+`representativeName` 放在每船設定頂層；真實表單拆成姓／名，因此不要再將它放入 fields 並指向不存在的完整姓名欄位。若沿用舊 local config，請把舊完整姓名 mapping 換成範例的姓／名 mappings，合併其餘 9 個欄位並填值。`config/*.local.json`、`.local/`、`artifacts/` 都已被 `.gitignore` 排除。
+
+`fields` 保存本機欄位 key 與值；`mappings` 將 key 對應到**真實客戶頁已檢查的唯一 selector**，可選 `kind: "fill" | "select" | "check"`。範例中的 9 個 selector 是 10/8 實際觀察，8 個 input 用 fill，人數用 select；沒有猜測或自動同意的 check mapping。過去一份表單不保證正式日期／時段完全相同，執行時仍重新核對唯一、可見、可編輯控制項。
+
+首次 full rehearsal 可先只設定代表人，將 fields 與 mappings 明確改為空的 `{}`／`[]`，以便只檢查表單；或先在 local config 填妥 9 個欄位，使用已觀察的 mappings。工具輸出可見欄位、labelSource、id、name、HTML 限制、選項及唯一 selector，不擷取欄位值。`htmlRequired` 是原始 DOM 值，`required`／`requiredSources` 另含可見必填標記與已確認的本機要求，避免官方 required=false 造成漏填。片假名依「全部資訊」說明採保守非空檢查，不宣稱伺服器一定必填。
+
+檢查 `form-1000.json`／`form-1030.json` 後，在同一客戶頁修改 local config，於 CLI 輸入 `f`；不重新 hold。工具先驗證所有 mappings，付款、規約、未知用途仍不自動操作，逐欄比對值、檢查非空及 HTML validity。這些檢查不是送出後的伺服器驗證，也未證明生日或海外資料格式會被接受。
+
+客戶欄位驗證通過後會建立 `.local/form-verification.json`，供 live 預檢核對 mapping。receipt v2 簽章包含驗證規則版本、mapping 定義與欄位 key；沒有姓名或其他個資，也不雜湊個資值。v1 舊紀錄失效，不能沿用或手寫新紀錄。若兩時段已確認使用相同表單及 mapping，這份驗證可供兩組不同客戶資料使用；實際值仍須各自正確。驗證須在 live 前 7 天內完成，修改 mapping 或欄位 keys 後須重新驗證。receipt 不保證網站往後不變，live 仍會重新檢查目前 DOM、必要欄位及填寫結果。
 
 遇到未支援欄位、缺少 mapping、瀏覽器驗證失敗或安全驗證欄位，工具保留頁面並提示人工接手，不會宣稱 Autofill 成功。付款、信用卡、OTP、密碼、CAPTCHA、同意規約及最後確認屬人工欄位。
 
@@ -120,6 +143,7 @@ src/
   site-rules.ts   已確認 EIPrO endpoint／資源讀取規則
   site.ts         真站日曆、availability、官方 hold action adapter
   autofill.ts     真實表單 discovery、local mappings、逐欄驗證
+  observed-form.ts 10/8 已觀察欄位契約與本機驗證規則版本
   readiness.ts    本機 mapping 驗證 receipt 及 live readiness
   diagnostics.ts  毫秒級事件、畫面與去敏感診斷
 config/
