@@ -13,10 +13,17 @@
     "full-rehearsal": "npm run build --silent && node dist/cli.js full-rehearsal",
     "live": "npm run build --silent && node dist/cli.js live",
     "doctor": "npm run build --silent && node dist/cli.js doctor",
+    "monitor:setup": "npm run build --silent && node dist/monitor-cli.js setup",
+    "monitor": "npm run build --silent && node dist/monitor-cli.js serve",
+    "monitor:start": "npm run build --silent && node dist/monitor-cli.js service-start",
+    "monitor:stop": "npm run build --silent && node dist/monitor-cli.js service-stop",
+    "monitor:status": "npm run build --silent && node dist/monitor-cli.js service-status",
+    "monitor:demo": "npm run build --silent && node dist/monitor-cli.js serve --demo",
+    "monitor:funnel": "npm run build --silent && node dist/monitor-cli.js funnel",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "check": "npm run typecheck && npm run lint && npm test",
+    "check": "npm run typecheck && npm run lint && npm test -- --maxWorkers=1",
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {

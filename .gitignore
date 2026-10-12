@@ -7,4 +7,5 @@ artifacts/
 config/*.local.json
 *.log
 dist/
+output/playwright/
 .DS_Store

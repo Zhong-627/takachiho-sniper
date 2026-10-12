@@ -80,6 +80,7 @@ async function fillSession(session: Session, config: AppConfig, diagnostics: Dia
 
 async function operatorConsole(sessions: Map<string, Session>, getConfig: () => Promise<AppConfig>, diagnostics: Diagnostics, mode: RunMode, manualCustomerForm: boolean, abort: AbortController): Promise<void> {
   const terminal = createInterface({ input: process.stdin, output: process.stdout });
+  terminal.on('SIGINT', () => { abort.abort(); diagnostics.event('automation_stopped'); console.log('已要求停止自動化，瀏覽器保留中。輸入 q 關閉。'); });
   console.log('瀏覽器保留中。輸入 f、handoff [時段] 或 q。Ctrl+C 只停止自動化；q 才關閉瀏覽器。');
   try {
     for await (const line of terminal) {
@@ -87,6 +88,7 @@ async function operatorConsole(sessions: Map<string, Session>, getConfig: () => 
       const targets = [...sessions.values()].filter((session) => !slot || session.slot === slot);
       if (command === 'q') {
         abort.abort();
+        diagnostics.event('automation_stopped');
         await Promise.allSettled([...sessions.values()].map((session) => session.browser?.close()));
         return;
       }
@@ -111,6 +113,7 @@ async function operatorConsole(sessions: Map<string, Session>, getConfig: () => 
     }
     // EOF has no interactive operator. Shut down safely; holds expire server-side.
     abort.abort();
+    diagnostics.event('automation_stopped');
     await Promise.allSettled([...sessions.values()].map((session) => session.browser?.close()));
   } finally { terminal.close(); }
 }
@@ -153,11 +156,19 @@ async function main(): Promise<void> {
   console.log(`模式 ${mode}；日期 ${config.targetDate}；時段 ${slots.join(' / ')}；診斷 ${diagnostics.dir}`);
   if (mode === 'live') console.log(`開始查詢：${formatReleaseTimes(monitoringStartMs(config)).taipei}；監控截止：${formatReleaseTimes(Date.parse(config.monitorUntil!)).taipei}；正常查詢回應後等待約 ${config.polling.baseDelayMs} ms。`);
   if (readiness) { diagnostics.event('live_readiness', { ...readiness }); printFormReadiness(readiness); }
-  const stop = (): void => { abort.abort(); console.log('已要求停止自動化，瀏覽器保留中。輸入 q 關閉。'); };
+  const stop = (): void => { abort.abort(); diagnostics.event('automation_stopped'); console.log('已要求停止自動化，瀏覽器保留中。輸入 q 關閉。'); };
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
   const heartbeat = setInterval(() => console.log(`等待／執行中：${formatReleaseTimes(Date.now()).taipei}`), 30_000);
   heartbeat.unref();
+  // This log-only heartbeat keeps the independent phone monitor honest even
+  // during long waits or after a hold while the operator console stays open.
+  const reportMonitorHeartbeat = (): void => diagnostics.event('monitor_heartbeat', {
+    automationActive: !abort.signal.aborted && [...sessions.values()].some((session) => session.active),
+  });
+  if (mode === 'live') reportMonitorHeartbeat();
+  const monitorHeartbeat = mode === 'live' ? setInterval(reportMonitorHeartbeat, 10_000) : undefined;
+  monitorHeartbeat?.unref();
   const worker = async (slot: string) => {
     const session = sessions.get(slot)!;
     const log = (event: string, data: Record<string, unknown> = {}): void => diagnostics.event(event, { ...data, ...(event === 'slot-selection' ? { timeSinceReleaseMs: Date.now() - Date.parse(config.releaseAt) } : {}) }, slot);
@@ -256,6 +267,7 @@ async function main(): Promise<void> {
     } finally { session.active = false; }
   };
   const work = runIndependentSlots(slots, worker).then(async (results) => {
+    diagnostics.event('automation_finished');
     await diagnostics.writeJson('slot-outcomes.json', results);
     if (results.some((result) => result.status === 'rejected')) process.exitCode = 2;
     clearInterval(heartbeat);
@@ -279,6 +291,7 @@ async function main(): Promise<void> {
     }
   } finally {
     clearInterval(heartbeat);
+    clearInterval(monitorHeartbeat);
     process.off('SIGINT', stop); process.off('SIGTERM', stop);
     await diagnostics.close();
   }

@@ -181,6 +181,27 @@ live 不受 `polling.maxAttempts` 或固定 20 分鐘限制，持續至暫留成
 
 診斷包含 DOM metadata、當前時段資訊、navigation timing、Cookie／session metadata 及 screenshots；不輸出 Cookie 值、action token、POST body 或個資。客戶頁 screenshots 會遮蔽輸入欄位；人工填寫與官方頁面仍可能顯示其他敏感資訊，分享前須人工檢查。工具不保存 storageState、HAR、Playwright trace 或完整客戶頁 HTML。
 
+## 手機查看搶位進度（PWA）
+
+只讀監控畫面可透過現有 Mac 的 Tailscale Funnel 提供 HTTPS 網址，手機不用安裝 Tailscale，也不用自備網域。監控服務獨立讀取 `artifacts/` 的最新正式搶位事件，沒有啟動／停止搶位或付款按鈕。各時段分別顯示查詢、重試、暫留、填表及人工接手狀態；「已暫留」不代表預約完成。
+
+第一次設定並啟動（不會執行搶位）：
+
+```bash
+npm run monitor:setup
+npm run monitor:start
+```
+
+`monitor:start` 會安裝並啟動目前使用者的 macOS 常駐服務，關閉終端或結束 Codex 工作後仍持續運作，登入 Mac 時自動啟動。接著執行：
+
+```bash
+npm run monitor:funnel
+```
+
+從手機開啟印出的 HTTPS 網址，使用 `.local/monitor-password.txt` 內的密碼登入，再加入主畫面。預設本機監控 port 為 **4174**、Funnel HTTPS port 為 **8443**，不會覆寫已被其他服務使用的 Funnel port。既有 443 服務保持原設定。密碼與雜湊設定檔都已被 Git 排除，權限為 `0600`；設定命令不會印出密碼。服務重新啟動或重設密碼後需再次登入。
+
+之後在原本的終端照常啟動 `live`，PWA 會自動追蹤最新正式執行。`npm run monitor:status` 檢查常駐服務，`npm run monitor:stop` 停止服務並停用自動啟動，再執行 `monitor:start` 可恢復。監控服務不讀取 `config.local.json` 或公開原始診斷、個資、screenshots。頁面或程式心跳中斷會標示資料過期，不會把舊資料當成仍在執行。詳細操作、演示模式、停止單一 Funnel 入口與自訂路徑見 [MONITOR.md](docs/MONITOR.md)。
+
 ## Repository architecture
 
 ```text
