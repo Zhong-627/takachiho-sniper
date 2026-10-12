@@ -80,6 +80,8 @@ describe('2026-10-08 observed customer form, offline reconstructed fixture only'
     expect(result.customerFieldsVerified).toBe(false);
     expect(result.status).toBe('mapping-required');
     expect(result.missingRequiredControls.some((control) => control.reason.includes('mapping'))).toBe(true);
+    expect(result.filledKeys).toEqual([]);
+    expect(await page.locator(observedSelector(OBSERVED_CUSTOMER_FIELDS[0])).inputValue()).toBe('');
   });
 
   it.each(OBSERVED_CUSTOMER_FIELDS.map((field) => field.key))('requires a nonblank %s value under observed instructions', async (key) => {
@@ -88,6 +90,7 @@ describe('2026-10-08 observed customer form, offline reconstructed fixture only'
     const result = await autofillCustomer(page, config);
     expect(result.customerFieldsVerified).toBe(false);
     expect(result.missingMappingKeys).toContain(key);
+    expect(result.filledKeys).toEqual([]);
   });
 
   it.each(['absent', 'wrong-type', 'readonly', 'duplicate'])('stops before any fill when the observed address control is %s', async (change) => {

@@ -161,7 +161,9 @@ export async function autofillCustomer(page: Page, customer: CustomerConfig): Pr
   const schema = await discoverCustomerForm(page);
   const result: AutofillResult = {
     status: 'mapping-required', customerFieldsVerified: false, schema, filledKeys: [], missingMappingKeys: [],
-    missingRequiredControls: [], manualControls: [], errors: [],
+    missingRequiredControls: [],
+    manualControls: schema.controls.filter((control) => control.category === 'manual').map((control) => ({ selector: control.selector, label: control.label, required: control.required })),
+    errors: [],
   };
   if (!schema.ready) {
     result.status = 'invalid';
@@ -229,8 +231,25 @@ export async function autofillCustomer(page: Page, customer: CustomerConfig): Pr
     if (control.selector) matched.add(control.selector);
   }
 
+  // Refuse the whole batch when a required customer field has no valid mapping,
+  // or the current form introduces an unsupported required control.
+  for (const control of schema.controls) {
+    if (!control.required || control.disabled || control.readOnly || control.category === 'manual') continue;
+    if (control.category === 'unsupported') {
+      result.missingRequiredControls.push({ selector: control.selector, label: control.label, reason: 'Manual control; automation is prohibited or its purpose is unconfirmed.' });
+    } else if (!control.selector) {
+      result.missingRequiredControls.push({ selector: null, label: control.label, reason: 'No unique stable selector was present in inspected DOM.' });
+    } else if (!matched.has(control.selector)) {
+      result.missingRequiredControls.push({ selector: control.selector, label: control.label, reason: 'No local mapping with a value for this required customer control.' });
+    }
+  }
   if (result.errors.length > 0) {
     result.status = 'invalid';
+    return result;
+  }
+  if (result.missingMappingKeys.length || result.missingRequiredControls.length || prepared.length === 0) {
+    result.status = schema.controls.some((control) => control.required && !control.disabled && !control.readOnly && control.category === 'unsupported')
+      ? 'manual-required' : 'mapping-required';
     return result;
   }
 
@@ -241,7 +260,11 @@ export async function autofillCustomer(page: Page, customer: CustomerConfig): Pr
       const currentIndex = await locator.evaluate((element) => Array.from(document.querySelectorAll('input, select, textarea')).indexOf(element));
       const current = currentSchema.controls.find((control) => control.domIndex === currentIndex);
       if (currentSchema.missingObservedFields?.length || currentSchema.observedProfile !== schema.observedProfile
+          || currentSchema.controls.some((control) => control.required && !control.disabled && !control.readOnly && control.category !== 'manual'
+            && (control.category !== 'customer' || !control.selector || !matched.has(control.selector)))
           || await locator.count() !== 1 || !current || current.category !== 'customer' || current.disabled || current.readOnly
+          || !await locator.isVisible()
+          || (mapping.kind === 'select' && !current.options.some((option) => option.value === mapping.value && !option.disabled))
           || current.id !== mapping.control.id || current.name !== mapping.control.name || current.type !== mapping.control.type
           || current.label !== mapping.control.label || current.contextLabel !== mapping.control.contextLabel
           || current.autocomplete !== mapping.control.autocomplete) {
@@ -266,13 +289,11 @@ export async function autofillCustomer(page: Page, customer: CustomerConfig): Pr
       // Playwright errors can embed entered values. Keep only a static reason.
       result.errors.push({ key: mapping.key, reason: 'Autofill could not complete for this inspected control.' });
     }
+    if (result.errors.length) break;
   }
 
   let customerRequirementsSatisfied = true;
   for (const control of schema.controls) {
-    if (control.category === 'manual') {
-      result.manualControls.push({ selector: control.selector, label: control.label, required: control.required });
-    }
     if (!control.required || control.disabled || control.readOnly) continue;
     if (control.category !== 'customer') {
       result.missingRequiredControls.push({ selector: control.selector, label: control.label, reason: 'Manual control; automation is prohibited or its purpose is unconfirmed.' });

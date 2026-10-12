@@ -93,7 +93,9 @@ describe('offline actual-DOM customer form inspection and autofill', () => {
     expect(result.customerFieldsVerified).toBe(false);
     expect(result.manualControls).toContainEqual({ selector: 'input#agreement', label: '規約に同意', required: true });
     expect(await page.locator('#agreement').isChecked()).toBe(false);
-    expect(result.missingRequiredControls.length).toBe(2);
+    expect(result.missingRequiredControls).toContainEqual(expect.objectContaining({ selector: 'input#unknown' }));
+    expect(result.filledKeys).toEqual([]);
+    expect(await page.locator('#customer-name').inputValue()).toBe('');
   });
 
   it('allows verified customer fields while keeping required legal consent manual', async () => {
@@ -134,6 +136,19 @@ describe('offline actual-DOM customer form inspection and autofill', () => {
     const result = await autofillCustomer(page, invalidEmail);
     expect(result.status).toBe('invalid');
     expect(result.errors.some((error) => error.reason.includes('HTML validation'))).toBe(true);
+    expect(await page.locator('#persons').inputValue()).toBe('');
+  });
+  it('stops further entry if a new unsupported required control appears while filling', async () => {
+    await page.setContent(form);
+    await page.locator('#customer-name').evaluate((element) => element.addEventListener('input', () => {
+      const input = document.createElement('input'); input.name = 'customOfficialField'; input.required = true;
+      document.querySelector('form')!.append(input);
+    }, { once: true }));
+    const result = await autofillCustomer(page, customer());
+    expect(result.status).toBe('invalid');
+    expect(result.customerFieldsVerified).toBe(false);
+    expect(result.filledKeys).toEqual(['representativeName']);
+    expect(await page.locator('#customer-email').inputValue()).toBe('');
   });
 
   it('does not recognize calendar controls as a customer form', async () => {

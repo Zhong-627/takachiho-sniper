@@ -103,6 +103,7 @@ export function validateModeConfig(
   mode: RunMode,
   confirmed: boolean,
   selectedSlot?: string,
+  manualCustomerForm = false,
 ): void {
   if (mode === 'inspect' || mode === 'rehearsal') return;
   if (!confirmed) throw new Error(`${mode} requires --confirm-reservation-side-effects.`);
@@ -119,6 +120,7 @@ export function validateModeConfig(
   if (new Set(normalized).size !== normalized.length) {
     throw new Error('Each boat requires a different representative. Configure distinct representativeName values per slot.');
   }
+  if (mode === 'live' && manualCustomerForm) return;
   for (const slot of slots) {
     const customer = config.customers[slot];
     if (!customer) continue;

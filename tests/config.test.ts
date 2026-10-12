@@ -134,6 +134,20 @@ describe('strict local config', () => {
     expect(() => validateModeConfig(config, 'live', true)).toThrow('representativeName mapping');
   });
 
+  it('manual customer entry permits missing autofill inputs but keeps reservation safeguards', () => {
+    const config = configWith({ customers: { '10:00': { representativeName: 'Example Person A' }, '10:30': { representativeName: 'Example Person B' } } });
+    expect(() => validateModeConfig(config, 'live', true, undefined, true)).not.toThrow();
+    expect(() => validateModeConfig(config, 'live', true)).toThrow('representativeName mapping');
+    expect(() => validateModeConfig(config, 'live', false, undefined, true)).toThrow('confirm');
+    config.browser.headless = true;
+    expect(() => validateModeConfig(config, 'live', true, undefined, true)).toThrow('visible browser');
+    config.browser.headless = false;
+    config.customers['10:30']!.representativeName = config.customers['10:00']!.representativeName;
+    expect(() => validateModeConfig(config, 'live', true, undefined, true)).toThrow('different representative');
+    delete config.customers['10:00'];
+    expect(() => validateModeConfig(config, 'live', true, undefined, true)).toThrow('actual representativeName');
+  });
+
   it('does not include local values in config errors', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'takachiho-config-'));
     const path = join(directory, 'local.json');

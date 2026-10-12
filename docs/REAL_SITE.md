@@ -38,7 +38,7 @@
 
 三個 checkbox 名稱都是 `data[dummy]`，當次 UUID id 跨次穩定性未驗證；全部保持人工，即使第三個文字是「確認」而非「同意」。付款 UI／安全欄位同時出現在表單，仍禁止自動操作。
 
-config example 已帶實際 mappings，個資只在 Mac 的 `config/config.local.json`。Mac full rehearsal 仍需取得一次明確授權的 hold，核對當次 DOM、生日格式與海外電話／地址、額外資源，在同一頁輸入 `f` 實測填寫而不重新占位。live 需要本機 receipt v2；v1 無法沿用。Cloud 勘查與離線 fixture 均不產生該紀錄。
+config example 已帶實際 mappings，個資只在 Mac 的 `config/config.local.json`。Mac full rehearsal 是選用演練，須有一次明確授權的 hold；可在同一頁核對當次 DOM、生日格式與海外電話／地址、額外資源並輸入 `f` 實測填寫。live 不要求先取得 receipt；近期相符紀錄僅供參考，每次自動填寫仍核對當次表單。live／full rehearsal 實際客戶欄位填寫與 HTML 檢查通過才記錄 receipt v2；失敗、人工模式與 Cloud 公開勘查不產生真實本機驗證紀錄。離線 fixture 僅使用測試暫存路徑，不冒充真站紀錄。
 
 客戶頁可能需要日曆未出現的新 script、stylesheet 或 read-only endpoint。這些仍受 allowlist 防護，尚須在 Mac 看 `blocked` 診斷後逐一研究確認，不能宣稱已完成驗證。不要以開放未知 POST、未知 redirect、第三方網域或付款 request 解決自動化載入問題。
 

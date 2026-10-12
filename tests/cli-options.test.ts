@@ -25,4 +25,12 @@ describe('CLI authorization', () => {
       expect(() => parseCli(['full-rehearsal', '--slot', slot, '--confirm-reservation-side-effects'])).toThrow('HH:mm');
     }
   });
+  it('allows manual customer entry only in live and doctor, retaining reservation authorization', () => {
+    expect(parseCli(['live', '--manual-customer-form', '--confirm-reservation-side-effects'])).toMatchObject({ mode: 'live', manualCustomerForm: true });
+    expect(parseCli(['doctor', '--manual-customer-form'])).toMatchObject({ mode: 'doctor', manualCustomerForm: true });
+    expect(() => parseCli(['live', '--manual-customer-form'])).toThrow('confirm');
+    expect(() => parseCli(['live', '--manual-customer-form', '--confirm-reservation-side-effects', '--headless'])).toThrow('visible');
+    for (const mode of ['inspect', 'rehearsal', 'full-rehearsal']) expect(() => parseCli([mode, '--manual-customer-form'])).toThrow('only with live or doctor');
+    expect(() => parseCli(['doctor', '--manual-customer-form=false'])).toThrow();
+  });
 });

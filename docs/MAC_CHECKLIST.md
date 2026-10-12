@@ -21,7 +21,7 @@ npm run doctor
 
 clone 後以 `open -e config/config.local.json` 或 `code config/config.local.json` 編輯。先核對 targetDate、releaseAt、1–2 個 slots，再填 `customers[時段]` 各自的 `representativeName` 及 9 個 fields，設定兩船時代表人不同；姓／名合併須與頂層代表人一致。範例已帶 10/8 觀察的 mappings，個資值都是空白。已有 local config 時不要用 cp 覆寫，手動合併新欄位與 mappings。細節見 [README 本機設定](../README.md#本機個資與-autofill) 與 [表單勘查](FORM_20261008.md)。
 
-初次 doctor 可能提示還沒有 customer mappings／full rehearsal receipt。這表示尚未具備 live readiness，先完成以下真站流程。
+doctor 分別報告搶位設定與填表狀態。自動模式缺少完整 fields／mappings 仍須修正；缺少近期 receipt 只提示待當次表單確認，退出碼仍為 0。人工填表可使用 `npm run doctor -- --manual-customer-form`，僅需各船代表人及正確目標設定。
 
 ## 2. 無 side effect 的真站 inspect
 
@@ -57,9 +57,9 @@ npm run rehearsal -- --date YYYY-MM-DD --attempts 3
 
 這個模式仍不建立 hold。安全模式的防護不會因頁面點擊或程式誤呼叫選取而解除。
 
-## 4. 一次真實 full rehearsal 與欄位驗證
+## 4. 選用：一次真實 full rehearsal 與欄位驗證
 
-**這一步會真的占用一艘船，通常約 15 分鐘。** 選擇你確實有意驗證的一個目前可預約時段；日／時間先用安全 inspect 確認。`--slot` 必須是 local config 的 slots 中一個 HH:mm，full rehearsal 每次只處理一個。
+**這一步會真的占用一艘船，通常約 15 分鐘。** 只有在目前有餘位且確實希望演練時執行，並非 live 的必要前置條件。沒有可預約時段時可直接準備正式模式，取得目標船位後核對當次表單。`--slot` 必須是 local config 的 slots 中一個 HH:mm，full rehearsal 每次只處理一個。
 
 1. 在 local config 為該 slot 填入真實 `representativeName` 與 9 個 fields。若這次僅要 discovery，將 fields／mappings 明確設為 `{}`／`[]`，保留頂層代表人；不是把空白資料當作已驗證填寫。
 2. 執行：
@@ -91,7 +91,7 @@ npm run doctor
 
 - [ ] doctor 輸出的 targetDate、1–2 個 slots 及台北／日本開賣時間均符合本次目標。releaseAt 必須含正確時區，customers key 與各 slot 相符；改目標方法見 [README](../README.md#更改預約日期與時間)。
 - [ ] 若設定兩個 slot，使用不同真實代表人，對應官方多艘船規則。
-- [ ] 每個設定 slot 的 local mappings 在 live 前 7 天內通過 full rehearsal，receipt 與當前 mappings／欄位 keys 一致。
+- [ ] 明確選擇自動或人工填表。自動模式填妥 fields／mappings；歷史紀錄只供參考，取得位置後仍會核對當次表單。人工模式加 `--manual-customer-form`，取得位置後輸入 `handoff` 自行填寫。
 - [ ] 可見 Chrome／Chromium 沒有 CAPTCHA／queue／維護問題。
 - [ ] Mac 系統時間自動同步、接電、網路穩定、禁用睡眠，不在開放前重啟或關閉終端。
 - [ ] 最後一次安全 inspect／rehearsal 沒有未解決的 DOM 變動或 `blocked` 必要資源。
@@ -104,6 +104,8 @@ caffeinate -dimsu npm run live -- --confirm-reservation-side-effects
 ```
 
 正式時間取自 local config 的 releaseAt；範例為 **2026-10-12 08:00:00 台北／09:00:00 日本**。各設定 slot 獨立嘗試；兩時段時，成功一個不會取消另一個。任一 slot 一旦派送 hold，就不會重新派送，即使回應不確定。兩頁成功均保留，由你輸入 `handoff` 後分別完成最後確認與付款。
+
+自動模式會在第一欄填寫前檢查所有 mappings、必填客戶欄位與選項。若不符，保留客戶頁並提示人工接手；填寫中驗證失敗也會停止後續填寫。人工模式只檢查表單，不自動填任何欄位，`f` 停用。兩種模式都保留同一時段不重新 hold 的防護。
 
 ## 尚無法提前證明的事項
 

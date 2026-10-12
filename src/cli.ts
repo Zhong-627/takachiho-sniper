@@ -1,14 +1,14 @@
 import { existsSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import type { Browser, BrowserContext, Page } from 'playwright';
-import { autofillCustomer } from './autofill.js';
 import { launchSlotBrowser } from './browser.js';
 import { parseCli } from './cli-options.js';
 import { assertReservationTargetsUnchanged, loadConfig, parseConfig, ReservationTargetsChangedError, validateModeConfig, type AppConfig, type RunMode } from './config.js';
 import { createDiagnostics, type Diagnostics } from './diagnostics.js';
-import { assertLiveReadiness, recordVerifiedForm } from './readiness.js';
+import { prepareCustomerForm } from './customer-step.js';
+import { assertLiveReadiness, type LiveReadiness } from './readiness.js';
 import { createGuardedContext, type SafetyGuard } from './safety.js';
-import { pollSlot, runIndependentSlots } from './scheduler.js';
+import { pollSlot, runIndependentSlots, type ReservationActionResult } from './scheduler.js';
 import { describeActionPlan, openCalendar, performReservation, probeAvailability, ManualInterventionError, SiteInspectionRequiredError, type SiteEvent } from './site.js';
 import { retryDelayMs, RetryableProbeError } from './retry.js';
 import { CUSTOMER_PATH, EIPRO_ORIGIN, EIPRO_READ_RULES, HOLD_PATH } from './site-rules.js';
@@ -30,9 +30,12 @@ npm run inspect -- --config config/config.local.json
 npm run rehearsal -- --attempts 3
 npm run full-rehearsal -- --slot HH:mm --date YYYY-MM-DD --confirm-reservation-side-effects
 npm run live -- --confirm-reservation-side-effects
+npm run live -- --manual-customer-form --confirm-reservation-side-effects
 npm run doctor
 安全模式可加 --headless --close。個資與觀察到的表單 mappings 只存本機。
 日期、開賣時間、1–2 個時段及各船個資由 local config 指定。時段使用日本當地 HH:mm。
+缺少近期表單紀錄仍可啟動；自動填表前核對當次表單，異常時保留船位交由人工。
+--manual-customer-form 僅供 live／doctor 使用，客戶資料全部由人工填寫，停用 f。
 瀏覽器保留時：f [HH:mm] 重新載入個資並填寫目前已 hold 的表單；handoff [HH:mm] 交由人工；q 關閉。
 程式不送出客戶表單、不付款、不處理 CAPTCHA / OTP / 3D Secure。`;
 
@@ -42,11 +45,21 @@ function personalSecrets(config: AppConfig): string[] {
   ] : []).filter(Boolean);
 }
 
-async function fillSession(session: Session, config: AppConfig, diagnostics: Diagnostics, mode: RunMode): Promise<void> {
-  if (!session.page || !session.guard || session.handedOff || !session.autofillEligible) return;
+function printFormReadiness(readiness: LiveReadiness): void {
+  for (const entry of readiness.formVerification) {
+    console.log(`[${entry.slot}] ${entry.status === 'manual' ? '客戶資料採人工填寫；取得船位後輸入 handoff。'
+      : entry.status === 'recent' ? '已有近期表單驗證紀錄；自動填表仍須核對當次表單。'
+        : '自動填表待當次表單確認：缺少近期相符紀錄，不阻止搶位。'}`);
+  }
+}
+
+async function fillSession(session: Session, config: AppConfig, diagnostics: Diagnostics, manualCustomerForm: boolean): Promise<ReservationActionResult> {
+  if (!session.page || !session.guard || session.handedOff || !session.autofillEligible) return { status: 'manual', reason: 'Held customer page is not eligible for automated entry.' };
   const customer = config.customers[session.slot];
-  if (!customer) return;
-  const result = await autofillCustomer(session.page, customer);
+  if (!customer) return { status: 'manual', reason: 'Local customer configuration is missing.' };
+  const step = await prepareCustomerForm(session.page, customer, { manualCustomerForm });
+  const result = step.result;
+  diagnostics.event('customer_form_mode', { mode: manualCustomerForm ? 'manual' : 'auto' }, session.slot);
   diagnostics.event('autofill_result', { status: result.status, customerFieldsVerified: result.customerFieldsVerified, filledKeys: result.filledKeys, missingMappingKeys: result.missingMappingKeys, missingRequiredControls: result.missingRequiredControls, manualControls: result.manualControls, errors: result.errors }, session.slot);
   await diagnostics.writeJson(`form-${session.slot.replace(':', '')}.json`, {
     ...result.schema,
@@ -56,13 +69,15 @@ async function fillSession(session: Session, config: AppConfig, diagnostics: Dia
       options: control.category === 'customer' ? control.options.map((option) => ({ optionValue: option.value, label: option.label, disabled: option.disabled })) : [],
     })),
   });
-  if (mode === 'full-rehearsal') await recordVerifiedForm(customer, result);
-  await diagnostics.snapshot(session.page, 'customer-autofill', session.slot);
-  console.log(`[${session.slot}] Autofill: ${result.status}。瀏覽器已保留；查看 form 診斷並完成必要人工操作。`);
-  if (result.status === 'mapping-required') console.log('請在本機 config 加入 form 診斷中實際觀察到的 mappings，儲存後在此終端輸入 f；不會再次 hold。');
+  if (step.verificationRecordFailed) diagnostics.event('form_verification_record_failed', { reason: 'Optional local evidence could not be saved; the held customer page is preserved.' }, session.slot);
+  await diagnostics.snapshot(session.page, manualCustomerForm ? 'customer-manual' : 'customer-autofill', session.slot);
+  console.log(`[${session.slot}] ${result.customerFieldsVerified ? '客戶欄位填寫與 HTML 檢查通過；請人工完成後續操作。'
+    : `客戶資料需要人工處理（${result.status}）；已保留頁面，輸入 handoff ${session.slot} 接手。`}`);
+  if (!manualCustomerForm && result.status === 'mapping-required') console.log('可依 form 診斷修正本機 mappings，儲存後輸入 f 在同一頁重新檢查；不會再次 hold。');
+  return { status: step.status, reason: step.reason };
 }
 
-async function operatorConsole(sessions: Map<string, Session>, getConfig: () => Promise<AppConfig>, diagnostics: Diagnostics, mode: RunMode, abort: AbortController): Promise<void> {
+async function operatorConsole(sessions: Map<string, Session>, getConfig: () => Promise<AppConfig>, diagnostics: Diagnostics, mode: RunMode, manualCustomerForm: boolean, abort: AbortController): Promise<void> {
   const terminal = createInterface({ input: process.stdin, output: process.stdout });
   console.log('瀏覽器保留中。輸入 f、handoff [時段] 或 q。Ctrl+C 只停止自動化；q 才關閉瀏覽器。');
   try {
@@ -76,8 +91,9 @@ async function operatorConsole(sessions: Map<string, Session>, getConfig: () => 
       }
       try {
         if (command === 'f') {
+          if (manualCustomerForm) { console.log('人工填表模式不執行 f。取得船位後輸入 handoff [時段]，在瀏覽器自行填寫。'); continue; }
           const config = await getConfig();
-          await Promise.allSettled(targets.filter((session) => !session.active && !session.handedOff).map((session) => fillSession(session, config, diagnostics, mode)));
+          await Promise.allSettled(targets.filter((session) => !session.active && !session.handedOff).map((session) => fillSession(session, config, diagnostics, false)));
         } else if (command === 'handoff') {
           if (mode === 'inspect' || mode === 'rehearsal') throw new Error('安全模式會持續阻擋 reservation 操作。');
           for (const session of targets) {
@@ -110,15 +126,21 @@ async function main(): Promise<void> {
   const config = await readLocalConfig();
   if (options.mode === 'doctor') {
     console.log(JSON.stringify({ platform: process.platform, arch: process.arch, node: process.version, targetDate: config.targetDate, release: formatReleaseTimes(Date.parse(config.releaseAt)), slots: config.slots, channel: config.browser.channel }, null, 2));
-    try { validateModeConfig(config, 'live', true); await assertLiveReadiness(config); console.log('Live 本機設定及近期表單驗證紀錄檢查通過。仍需 Mac 真實網站演練。'); }
+    try {
+      validateModeConfig(config, 'live', true, undefined, options.manualCustomerForm);
+      const readiness = await assertLiveReadiness(config, undefined, undefined, options.manualCustomerForm);
+      console.log('搶位設定檢查通過。');
+      printFormReadiness(readiness);
+    }
     catch (error) { console.log(error instanceof Error ? error.message : 'Live 尚未準備完成。'); process.exitCode = 2; }
     return;
   }
   const mode = options.mode;
-  validateModeConfig(config, mode, options.confirmed, options.slot);
+  validateModeConfig(config, mode, options.confirmed, options.slot, options.manualCustomerForm);
   if (sideEffects && !process.stdin.isTTY) throw new Error('Reservation modes require an interactive terminal for operator takeover.');
+  let readiness: LiveReadiness | undefined;
   if (mode === 'live') {
-    await assertLiveReadiness(config);
+    readiness = await assertLiveReadiness(config, undefined, undefined, options.manualCustomerForm);
     if (Date.now() > Date.parse(config.releaseAt) + 20 * 60_000) throw new Error('The live release window has elapsed. Use inspect/rehearsal for diagnostics.');
   }
   const secrets = personalSecrets(config);
@@ -128,6 +150,7 @@ async function main(): Promise<void> {
   const sessions = new Map(slots.map((slot) => [slot, { slot, active: true, handedOff: false } as Session]));
   diagnostics.event('run_started', { mode, targetDate: config.targetDate, slots, release: formatReleaseTimes(Date.parse(config.releaseAt)), platform: process.platform, arch: process.arch, node: process.version });
   console.log(`模式 ${mode}；日期 ${config.targetDate}；時段 ${slots.join(' / ')}；診斷 ${diagnostics.dir}`);
+  if (readiness) { diagnostics.event('live_readiness', { ...readiness }); printFormReadiness(readiness); }
   const stop = (): void => { abort.abort(); console.log('已要求停止自動化，瀏覽器保留中。輸入 q 關閉。'); };
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
@@ -140,7 +163,9 @@ async function main(): Promise<void> {
       throwIfAborted(abort.signal);
       session.browser = await launchSlotBrowser(config);
       throwIfAborted(abort.signal);
-      const guarded = await createGuardedContext(session.browser, { locale: 'ja-JP', timezoneId: 'Asia/Tokyo', viewport: { width: 1440, height: 1100 }, acceptDownloads: false }, {
+      // Follow the visible window size so manual payment controls cannot be
+      // clipped below a smaller Mac display by a fixed emulated viewport.
+      const guarded = await createGuardedContext(session.browser, { locale: 'ja-JP', timezoneId: 'Asia/Tokyo', viewport: null, acceptDownloads: false }, {
         mode, confirmed: options.confirmed, origin: EIPRO_ORIGIN, readRules: EIPRO_READ_RULES, holdPath: HOLD_PATH, customerPath: CUSTOMER_PATH, requestTimeoutMs: config.timeouts.navigationMs,
         onDecision: (decision) => log('safety_decision', { ...decision }),
       });
@@ -201,8 +226,7 @@ async function main(): Promise<void> {
           try {
             await performReservation(session.page!, currentEvent, session.guard!, config.timeouts, log);
             session.autofillEligible = true;
-            await fillSession(session, config, diagnostics, mode);
-            return { status: 'customer-form-ready' as const };
+            return await fillSession(session, config, diagnostics, options.manualCustomerForm);
           } catch (error) {
             if (error instanceof ManualInterventionError || error instanceof SiteInspectionRequiredError) return { status: 'manual' as const, reason: error.message };
             throw error;
@@ -235,10 +259,10 @@ async function main(): Promise<void> {
       await operatorConsole(sessions, async () => {
         const updated = await readLocalConfig();
         if (sideEffects) assertReservationTargetsUnchanged(config, updated);
-        validateModeConfig(updated, mode, options.confirmed, options.slot);
+        validateModeConfig(updated, mode, options.confirmed, options.slot, options.manualCustomerForm);
         diagnostics.addSecrets(personalSecrets(updated));
         return updated;
-      }, diagnostics, mode, abort);
+      }, diagnostics, mode, options.manualCustomerForm, abort);
       await work;
       await Promise.allSettled([...sessions.values()].map((session) => session.browser?.close()));
     }

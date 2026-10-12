@@ -43,7 +43,7 @@ npm run check
 
 例如把原 `customers["10:00"]`、`customers["10:30"]` 的 key 改為 `"11:00"`、`"11:30"`，保留各船自己的個資與已確認的 mappings。只預約一艘時，slots 可為 `["11:00"]`；未列入 slots 的客戶設定不會啟動預約。程式不自動推算開賣日，也不因時間格式合法就認定網站有該時段，仍須核對官方 availability。漏填日期、開賣時間或 slots 會報錯，不會使用舊目標。
 
-儲存後執行 `npm run doctor`，核對輸出的 targetDate、slots 及台北／日本開賣時間；缺少近期 Autofill receipt 時仍會提示尚未具備 live readiness。正式 `live` 的目標全部取自設定檔，不接受 `--date`／`--slot` 覆寫。執行中 `f` 只可重新載入個資及 mappings；若日期、開賣時間或 slots 已變更，會停止填寫並保留原頁，先確認既有 hold 狀態再另行啟動。
+儲存後執行 `npm run doctor`，核對輸出的 targetDate、slots 及台北／日本開賣時間。doctor 分別報告搶位設定與各時段的填表狀態；缺少近期相符的 Autofill receipt 只會提示「待當次表單確認」，不阻止啟動。正式 `live` 的目標全部取自設定檔，不接受 `--date`／`--slot` 覆寫。執行中 `f` 只可重新載入個資及 mappings；若日期、開賣時間或 slots 已變更，會停止填寫並保留原頁，先確認既有 hold 狀態再另行啟動。
 
 ## 模式與命令
 
@@ -60,17 +60,21 @@ npm run inspect
 npm run rehearsal -- --attempts 3
 npm run full-rehearsal -- --slot 10:00 --date YYYY-MM-DD --confirm-reservation-side-effects
 npm run live -- --confirm-reservation-side-effects
+npm run doctor -- --manual-customer-form
+npm run live -- --manual-customer-form --confirm-reservation-side-effects
 ```
 
 `YYYY-MM-DD` 請換成從 inspect 確認、目前已開放且有餘位的日期，`--slot` 改成 slots 中其中一個時間。full rehearsal **真的會占用一個時段**，只能在有此意圖時執行。範例目標 2026-10-26 在 10 月 12 日開放前沒有可執行的 hold，不能用這個未開放日期驗證客戶表單。
 
 所有命令預設讀取 `config/config.local.json`，也接受 `--config <本機 JSON 路徑>`。`inspect`、`rehearsal`、`full-rehearsal` 可用 `--date`；`live` 完整使用 local config 的日期、開賣時間及時段。安全模式可加 `--headless` 或 `--close`，供非互動診斷使用；有 side effect 的模式必須保留可見瀏覽器。
 
+`live` 預設在取得船位後檢查當次表單並嘗試自動填寫；不要求先占用其他日期取得 receipt。可在 `live`／`doctor` 加 `--manual-customer-form`，讓所有客戶資料由人工填寫。人工模式仍需各船的真實 `representativeName`、不同代表人及正確預約目標；`fields`／`mappings` 可留空，`f` 停用，取得位置後輸入 `handoff` 在瀏覽器填寫。
+
 預設保持瀏覽器開啟，CLI 終端可輸入：
 
 | 命令 | 行為 |
 | --- | --- |
-| `f [HH:mm]` | 在目前已 hold 的客戶頁重新載入本機設定並填寫／驗證；不再選取時段。省略時段會處理所有已結束的 flow |
+| `f [HH:mm]` | 自動填表模式在目前已 hold 的客戶頁重新載入本機設定並填寫／驗證；不再選取時段。人工填表模式停用此命令。省略時段會處理所有已結束的 flow |
 | `handoff [HH:mm]` | 僅在已授權 reservation 模式把已 hold 的流程交由使用者操作，停止自動化並移除 HTTP 防護。省略時段會處理所有可交接的 flow |
 | `q` | 關閉瀏覽器並離開；關閉不代表立即取消伺服器 hold |
 
@@ -82,7 +86,7 @@ npm run live -- --confirm-reservation-side-effects
 
 若要驗證「目前可預約時段會如何選取」，先以 `inspect -- --date YYYY-MM-DD` 檢查已開放日期，再用相同日期執行 `rehearsal`。安全演練只列出正式流程會發出的 action，永遠不點選建立 hold。
 
-完成後依 [Mac 檢查清單](docs/MAC_CHECKLIST.md) 執行單一時段 full rehearsal，取得真實客戶欄位。不要跳過這一步直接執行 live。
+若有目前可預約時段且確實希望演練，可依 [Mac 檢查清單](docs/MAC_CHECKLIST.md) 執行單一時段 full rehearsal，取得真實客戶欄位。這是選用演練，不是 live 啟動的前置條件；沒有餘位可演練時，仍可等待正式開賣，取得目標船位後檢查表單。
 
 ## 本機個資與 Autofill
 
@@ -113,9 +117,9 @@ open -e config/config.local.json
 
 首次 full rehearsal 可先只設定代表人，將 fields 與 mappings 明確改為空的 `{}`／`[]`，以便只檢查表單；或先在 local config 填妥 9 個欄位，使用已觀察的 mappings。工具輸出可見欄位、labelSource、id、name、HTML 限制、選項及唯一 selector，不擷取欄位值。`htmlRequired` 是原始 DOM 值，`required`／`requiredSources` 另含可見必填標記與已確認的本機要求，避免官方 required=false 造成漏填。片假名依「全部資訊」說明採保守非空檢查，不宣稱伺服器一定必填。
 
-檢查 `form-HHmm.json`（例如 `form-1000.json`）後，在同一客戶頁修改 local config 的個資／mappings，於 CLI 輸入 `f`；不重新 hold。工具先驗證所有 mappings，付款、規約、未知用途仍不自動操作，逐欄比對值、檢查非空及 HTML validity。這些檢查不是送出後的伺服器驗證，也未證明生日或海外資料格式會被接受。
+檢查 `form-HHmm.json`（例如 `form-1000.json`）後，自動填表模式可在同一客戶頁修改 local config 的個資／mappings，於 CLI 輸入 `f`；不重新 hold。工具在第一欄填寫前核對全部 mappings、必填客戶欄位及人數選項；缺少 mapping 或出現用途不明的必填欄位時整批停止。填寫中若欄位改變、值不一致或 HTML validity 失敗，也停止後續填寫並提示 `handoff`。付款、規約、未知用途仍不自動操作。這些檢查不是送出後的伺服器驗證，也未證明生日或海外資料格式會被接受。
 
-客戶欄位驗證通過後會建立 `.local/form-verification.json`，供 live 預檢核對 mapping。receipt v2 簽章包含驗證規則版本、mapping 定義與欄位 key；沒有姓名或其他個資，也不雜湊個資值。v1 舊紀錄失效，不能沿用或手寫新紀錄。若兩時段已確認使用相同表單及 mapping，這份驗證可供兩組不同客戶資料使用；實際值仍須各自正確。驗證須在 live 前 7 天內完成，修改 mapping 或欄位 keys 後須重新驗證。receipt 不保證網站往後不變，live 仍會重新檢查目前 DOM、必要欄位及填寫結果。
+full rehearsal 或 live 的客戶欄位填寫與 HTML 檢查通過後會建立 `.local/form-verification.json`，作為歷史參考。receipt v2 簽章包含驗證規則版本、mapping 定義與欄位 key；沒有姓名或其他個資，也不雜湊個資值。v1 舊紀錄不列為近期參考，不應手寫新紀錄。7 天內且 mapping／欄位 keys 相符時顯示「已有近期紀錄」；缺少、過期或定義改變時顯示「待當次表單確認」，兩者均可啟動 live。每次自動填表都重新核對目前 DOM 與填寫結果。失敗或人工模式不建立驗證紀錄；參考紀錄寫入失敗也不會丟棄已取得的船位。
 
 遇到未支援欄位、缺少 mapping、瀏覽器驗證失敗或安全驗證欄位，工具保留頁面並提示人工接手，不會宣稱 Autofill 成功。付款、信用卡、OTP、密碼、CAPTCHA、同意規約及最後確認屬人工欄位。
 
@@ -123,7 +127,7 @@ open -e config/config.local.json
 
 ## 正式執行
 
-設定開賣時間前確認 Mac 時間自動同步、接上電源、網路穩定，且 doctor、演練及 Autofill 驗證都通過。保持終端與 Chrome 開啟，建議提前數分鐘執行：
+設定開賣時間前確認 Mac 時間自動同步、接上電源、網路穩定，且 doctor 的搶位設定檢查通過，inspect／安全演練可正常讀取目標。歷史填表紀錄僅供參考。保持終端與 Chrome 開啟，建議提前數分鐘執行：
 
 ```bash
 caffeinate -dimsu npm run live -- --confirm-reservation-side-effects
@@ -166,6 +170,7 @@ src/
   site-rules.ts   已確認 EIPrO endpoint／資源讀取規則
   site.ts         真站日曆、availability、官方 hold action adapter
   autofill.ts     真實表單 discovery、local mappings、逐欄驗證
+  customer-step.ts 當次填表、人工接手結果與選用驗證紀錄
   observed-form.ts 10/8 已觀察欄位契約與本機驗證規則版本
   readiness.ts    本機 mapping 驗證 receipt 及 live readiness
   diagnostics.ts  毫秒級事件、畫面與去敏感診斷

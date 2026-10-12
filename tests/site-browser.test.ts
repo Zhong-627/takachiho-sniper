@@ -1,9 +1,14 @@
 import { existsSync } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { chromium, type APIResponse, type Browser, type BrowserContext, type Page, type Route } from 'playwright';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { autofillCustomer } from '../src/autofill.js';
 import { parseConfig, validateModeConfig } from '../src/config.js';
-import { runIndependentSlots } from '../src/scheduler.js';
+import { prepareCustomerForm } from '../src/customer-step.js';
+import { assertLiveReadiness } from '../src/readiness.js';
+import { pollSlot, runIndependentSlots } from '../src/scheduler.js';
 import { SafetyGuard, type GuardDecision, type RunMode } from '../src/safety.js';
 import { CUSTOMER_PATH, EIPRO_ORIGIN, EIPRO_READ_RULES, HOLD_PATH } from '../src/site-rules.js';
 import {
@@ -274,6 +279,46 @@ describe.runIf(executable !== undefined)('offline browser adapter fixtures', () 
       } finally { await state.context.close(); }
     });
     expect(results).toEqual(config.slots.map((slot) => ({ status: 'fulfilled', value: slot })));
+  });
+
+  it('missing history permits both live flows, and failed current-form validation retains one hold without interrupting the other slot', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'takachiho-live-form-'));
+    const config = parseConfig({ targetDate, releaseAt: '2026-10-12T09:00:00+09:00', slots: ['10:00', '10:30'],
+      customers: Object.fromEntries(['10:00', '10:30'].map((slot, index) => [slot, {
+        representativeName: `Synthetic Person ${index}`,
+        fields: { representativeName: `Synthetic Person ${index}`, email: `fixture-${index}@example.invalid`, ...(index === 0 ? { extra: 'NEVER_ENTER_CARD' } : {}) },
+        mappings: [{ key: 'representativeName', selector: '#fixture-name' }, { key: 'email', selector: '#fixture-email' },
+          ...(index === 0 ? [{ key: 'extra', selector: '#fixture-card' }] : [])],
+      }])),
+    });
+    try {
+      validateModeConfig(config, 'live', true);
+      expect((await assertLiveReadiness(config, join(directory, 'missing.json'))).formVerification.map((entry) => entry.status)).toEqual(['pending', 'pending']);
+      const results = await runIndependentSlots(config.slots, async (slot) => {
+        const state = await fixture(browser, 'live');
+        try {
+          await openCalendar(state.page, targetDate, timeouts, vi.fn());
+          const sleep = vi.fn();
+          const outcome = await pollSlot({ slot, maxAttempts: 3, sleep,
+            probe: async () => probeAvailability(state.page, targetDate, slot, timeouts, vi.fn()),
+            act: async () => {
+              await performReservation(state.page, fixtureEvents[config.slots.indexOf(slot)]!, state.guard, timeouts, vi.fn());
+              const step = await prepareCustomerForm(state.page, config.customers[slot]!, { receiptPath: join(directory, slot.replace(':', '') + '.json') });
+              return { status: step.status, reason: step.reason };
+            },
+          });
+          expect(outcome.attempts).toBe(1);
+          expect(sleep).not.toHaveBeenCalled();
+          expect(state.guard.state.holdConfirmed).toBe(true);
+          expect(state.requests.filter((request) => request.pathname === HOLD_PATH && request.decision.allowed)).toHaveLength(1);
+          expect(await state.page.locator('#fixture-card').inputValue()).toBe('');
+          expect(await state.page.locator('#fixture-otp').inputValue()).toBe('');
+          expect(await state.page.locator('#fixture-name').inputValue()).toBe(slot === '10:00' ? '' : config.customers[slot]!.representativeName);
+          return outcome.status;
+        } finally { await state.context.close(); }
+      });
+      expect(results).toEqual([{ status: 'fulfilled', value: 'manual' }, { status: 'fulfilled', value: 'customer-form-ready' }]);
+    } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
   it('propagates server Retry-After on HTTP 429 without reservation requests', async () => {

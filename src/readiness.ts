@@ -7,6 +7,11 @@ import { AUTOFILL_POLICY_VERSION } from './observed-form.js';
 
 const RECEIPT_PATH = '.local/form-verification.json';
 interface Receipt { version: 2; entries: Array<{ signature: string; verifiedAt: string }> }
+const receiptWrites = new Map<string, Promise<void>>();
+export interface LiveReadiness {
+  customerFormMode: 'auto' | 'manual';
+  formVerification: Array<{ slot: string; status: 'recent' | 'pending' | 'manual' }>;
+}
 /** Includes definitions and keys, never hashes or stores personal values. */
 export function mappingSignature(customer: CustomerConfig): string {
   return createHash('sha256').update(JSON.stringify({
@@ -29,23 +34,36 @@ async function readReceipt(path: string): Promise<Receipt> {
 
 export async function recordVerifiedForm(customer: CustomerConfig, result: AutofillResult, path = RECEIPT_PATH): Promise<void> {
   if (!result.customerFieldsVerified) return;
-  const receipt = await readReceipt(path);
-  const signature = mappingSignature(customer);
-  receipt.entries = receipt.entries.filter((entry) => entry.signature !== signature);
-  receipt.entries.push({ signature, verifiedAt: new Date().toISOString() });
-  await mkdir(dirname(resolve(path)), { recursive: true, mode: 0o700 });
-  await writeFile(path, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
+  const destination = resolve(path);
+  // Live slots may finish together with different mappings. Preserve both entries.
+  const pending = (receiptWrites.get(destination) ?? Promise.resolve()).catch(() => undefined).then(async () => {
+    const receipt = await readReceipt(destination);
+    const signature = mappingSignature(customer);
+    receipt.entries = receipt.entries.filter((entry) => entry.signature !== signature);
+    receipt.entries.push({ signature, verifiedAt: new Date().toISOString() });
+    await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+    await writeFile(destination, `${JSON.stringify(receipt, null, 2)}\n`, { mode: 0o600 });
+  });
+  receiptWrites.set(destination, pending);
+  try { await pending; }
+  finally { if (receiptWrites.get(destination) === pending) receiptWrites.delete(destination); }
 }
 
-export async function assertLiveReadiness(config: AppConfig, path = RECEIPT_PATH, now = Date.now()): Promise<void> {
+/** Required local inputs still block startup; historical evidence is advisory. */
+export async function assertLiveReadiness(config: AppConfig, path = RECEIPT_PATH, now = Date.now(), manualCustomerForm = false): Promise<LiveReadiness> {
+  if (manualCustomerForm) return { customerFormMode: 'manual', formVerification: config.slots.map((slot) => ({ slot, status: 'manual' })) };
   const receipt = await readReceipt(path);
+  const formVerification: LiveReadiness['formVerification'] = [];
   for (const slot of config.slots) {
     const customer = config.customers[slot];
-    if (!customer || customer.mappings.length === 0 || Object.values(customer.fields).some((value) => !value.trim())) {
+    if (!customer || customer.mappings.length === 0 || Object.values(customer.fields).some((value) => !value.trim())
+        || customer.mappings.some((mapping) => !customer.fields[mapping.key]?.trim())
+        || Object.keys(customer.fields).some((key) => !customer.mappings.some((mapping) => mapping.key === key))) {
       throw new Error(`[${slot}] Live requires complete local customer fields and observed form mappings.`);
     }
     const signature = mappingSignature(customer);
     const verified = receipt.entries.some((entry) => entry.signature === signature && Number.isFinite(Date.parse(entry.verifiedAt)) && now - Date.parse(entry.verifiedAt) >= 0 && now - Date.parse(entry.verifiedAt) <= 7 * 86_400_000);
-    if (!verified) throw new Error(`[${slot}] Run full-rehearsal and verify Autofill within 7 days before live. Mapping definitions must match the verified local receipt.`);
+    formVerification.push({ slot, status: verified ? 'recent' : 'pending' });
   }
+  return { customerFormMode: 'auto', formVerification };
 }

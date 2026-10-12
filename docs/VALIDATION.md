@@ -38,3 +38,11 @@ npm run build
 Linux x64／Node.js 24.19.0／Playwright Chromium Headless Shell 141：`npm run check` 的 typecheck、lint 與 **206 項測試（13 個 suites）全部通過，無跳過**；`npm run build` 成功。新增 21 項測試，涵蓋必填目標、HH:mm 邊界、漏改 customers key、任意時段的代表人及 readiness、開賣時間等待、執行中目標變更與 CLI 覆寫限制。離線瀏覽器整合案例使用 2026-11-03、09:15／11:45 的合成日曆，兩個流程各取得一次受保護 fixture hold 並使用各自假資料，信用卡／OTP 空白、客戶表單未提交，再次 hold 仍被拒絕。此日期／時段僅為測試資料，不表示官方實際提供。
 
 編譯後的 doctor 另以暫存 config 驗證單／雙自訂時段，正確輸出乘船日期、時段及台北開賣時間，缺少真實 receipt 時維持未就緒。編譯後 full-rehearsal 接受 09:15，再由非互動終端防護停止，沒有啟動瀏覽器。所有測試使用離線 fixture／暫存資料，沒有操作真站或建立新的真實驗證紀錄。Mac Autofill 與正式 availability 仍須依檢查清單確認。
+
+## 2026-10-08：搶位啟動與歷史填表紀錄分開
+
+歷史 receipt 改為參考提示。缺少、舊版、過期或 mapping 不相符的紀錄不再阻止 live 啟動；自動模式的本機欄位／mapping 完整性、代表人一致性、不同代表人、可見瀏覽器與 side-effect 確認仍須通過。新增 `--manual-customer-form`（live／doctor），保留代表人與目標檢查，客戶頁只檢查、不自動填寫，`f` 停用。
+
+每次自動填表在第一欄寫入前檢查全部 mappings、必填客戶欄位與選項；未知必填欄位或缺少 mapping 時整批停止。填寫中的欄位變更、值不符或 HTML validity 失敗也停止後續寫入。結果未通過時明確回報 manual 並提示 handoff，仍保留已取得頁面；同一時段不重新 hold，另一時段獨立繼續。成功填寫可更新 live／full rehearsal 的歷史紀錄，並行寫入保留兩組不同 mapping 的紀錄；紀錄寫入失敗不丟棄已取得的位置。
+
+macOS arm64／Node.js 22.16.0／Playwright Chromium 141：`npm run check` 的型別、lint 與 **218 項測試（14 個 suites）全部通過，無跳過**。新增的離線瀏覽器整合案例確認無 receipt 也可準備兩組 live flow，第一組 mapping 指向付款欄位時沒有填入任何個資、只建立一次 fixture hold，第二組正常完成客戶欄位填寫；信用卡／OTP 保持空白。其他案例涵蓋人工模式零寫入、未對應的必填欄位、填寫中新增欄位、HTML 失敗後停止、瀏覽器錯誤去敏感與選用紀錄寫入失敗。
