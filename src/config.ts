@@ -38,6 +38,8 @@ export const customerConfigSchema = z.object({
 export const configSchema = z.object({
   targetDate: z.string().refine(validDate, 'Expected a valid YYYY-MM-DD calendar date'),
   releaseAt: z.string().datetime({ offset: true }).refine((value) => Number.isFinite(Date.parse(value)), 'Expected a valid release instant with UTC offset'),
+  monitorFrom: z.string().datetime({ offset: true }).refine((value) => Number.isFinite(Date.parse(value)), 'Expected a valid monitoring start with UTC offset').optional(),
+  monitorUntil: z.string().datetime({ offset: true }).refine((value) => Number.isFinite(Date.parse(value)), 'Expected a valid monitoring deadline with UTC offset').optional(),
   slots: z.array(slotSchema).min(1).max(2),
   browser: z.object({
     channel: z.enum(['chrome', 'chromium']).default('chromium'),
@@ -45,6 +47,7 @@ export const configSchema = z.object({
     headless: z.boolean().default(false),
   }).strict().default({ channel: 'chromium', headless: false }),
   polling: z.object({
+    // Legacy setting accepted for old local files; live uses monitorUntil instead.
     maxAttempts: z.number().int().min(1).max(1000).default(80),
     baseDelayMs: z.number().int().min(750).max(60_000).default(1250),
     maxDelayMs: z.number().int().min(750).max(300_000).default(20_000),
@@ -64,10 +67,21 @@ export const configSchema = z.object({
   if (config.polling.maxDelayMs < config.polling.baseDelayMs) {
     context.addIssue({ code: 'custom', message: 'maxDelayMs must be at least baseDelayMs', path: ['polling', 'maxDelayMs'] });
   }
+  if (config.monitorUntil && Date.parse(config.monitorUntil) <= Date.parse(config.releaseAt)) {
+    context.addIssue({ code: 'custom', message: 'monitorUntil must be later than releaseAt', path: ['monitorUntil'] });
+  }
+  if (config.monitorFrom && Date.parse(config.monitorFrom) > Date.parse(config.releaseAt)) {
+    context.addIssue({ code: 'custom', message: 'monitorFrom must be at or before releaseAt', path: ['monitorFrom'] });
+  }
 });
 
 export type CustomerConfig = z.infer<typeof customerConfigSchema>;
 export type AppConfig = z.infer<typeof configSchema>;
+
+/** Old local files continue to begin polling at the configured release instant. */
+export function monitoringStartMs(config: AppConfig): number {
+  return Date.parse(config.monitorFrom ?? config.releaseAt);
+}
 
 /** Error messages contain paths and rules, never local customer values. */
 export function parseConfig(value: unknown): AppConfig {
@@ -108,6 +122,7 @@ export function validateModeConfig(
   if (mode === 'inspect' || mode === 'rehearsal') return;
   if (!confirmed) throw new Error(`${mode} requires --confirm-reservation-side-effects.`);
   if (config.browser.headless) throw new Error('Reservation modes require a visible browser for manual payment and security challenges.');
+  if (mode === 'live' && !config.monitorUntil) throw new Error('live requires monitorUntil with an explicit UTC offset in local config.');
   if (mode === 'full-rehearsal' && (!selectedSlot || !config.slots.includes(selectedSlot))) {
     throw new Error('full-rehearsal requires --slot with one configured target slot.');
   }
@@ -154,9 +169,16 @@ export class ReservationTargetsChangedError extends Error {
   }
 }
 
+/** Late starts are allowed until the configured deadline, without a release-age limit. */
+export function assertLiveMonitoringWindow(config: AppConfig, nowMs = Date.now()): void {
+  if (!config.monitorUntil) throw new Error('live requires monitorUntil with an explicit UTC offset in local config.');
+  if (nowMs >= Date.parse(config.monitorUntil)) throw new Error('The configured monitoring deadline has elapsed; no live reservation will start.');
+}
+
 /** Reloading customer values must not retarget an already running reservation. */
 export function assertReservationTargetsUnchanged(original: AppConfig, updated: AppConfig): void {
   if (original.targetDate !== updated.targetDate || Date.parse(original.releaseAt) !== Date.parse(updated.releaseAt)
+      || monitoringStartMs(original) !== monitoringStartMs(updated)
       || original.slots.length !== updated.slots.length || original.slots.some((slot) => !updated.slots.includes(slot))) {
     throw new ReservationTargetsChangedError();
   }

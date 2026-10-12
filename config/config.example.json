@@ -1,6 +1,8 @@
 {
-  "targetDate": "2026-10-26",
-  "releaseAt": "2026-10-12T09:00:00+09:00",
+  "targetDate": "2026-10-24",
+  "releaseAt": "2026-10-10T09:00:00+09:00",
+  "monitorFrom": "2026-10-10T07:58:00+08:00",
+  "monitorUntil": "2026-10-10T10:00:00+08:00",
   "slots": [
     "10:00",
     "10:30"
@@ -10,8 +12,7 @@
     "headless": false
   },
   "polling": {
-    "maxAttempts": 80,
-    "baseDelayMs": 1250,
+    "baseDelayMs": 750,
     "maxDelayMs": 20000
   },
   "timeouts": {

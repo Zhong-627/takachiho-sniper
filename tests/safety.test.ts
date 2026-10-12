@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assertSideEffectsAuthorized, isSuccessfulHoldResponse, SafetyGuard, type GuardOptions, type ReadRequestRule, type RequestSnapshot, type ReservationPlan } from '../src/safety.js';
+import { assertSideEffectsAuthorized, isRejectedHoldResponse, isSuccessfulHoldResponse, SafetyGuard, type GuardOptions, type ReadRequestRule, type RequestSnapshot, type ReservationPlan } from '../src/safety.js';
 import { CUSTOMER_PATH, EIPRO_ORIGIN, EIPRO_READ_RULES, HOLD_PATH } from '../src/site-rules.js';
 
 const origin = 'https://example.test';
@@ -110,6 +110,24 @@ describe('one-shot reservation capability', () => {
     expect(isSuccessfulHoldResponse(200, { data: { result: '1' } })).toBe(true);
     for (const payload of [undefined, null, {}, { result: '1' }, { data: { result: 1 } }, { data: { result: '9' } }, { data: { result: '0' } }]) expect(isSuccessfulHoldResponse(200, payload)).toBe(false);
     for (const status of [199, 302, 429, 500]) expect(isSuccessfulHoldResponse(status, { data: { result: '1' } })).toBe(false);
+  });
+
+  it('requires a successful HTTP response with explicit string zero to prove rejection', () => {
+    expect(isRejectedHoldResponse(200, { data: { result: '0' } })).toBe(true);
+    for (const payload of [undefined, null, {}, { data: {} }, { data: { result: 0 } }, { data: { result: '1' } }, { data: { result: '8' } }, { data: { result: '9' } }]) {
+      expect(isRejectedHoldResponse(200, payload)).toBe(false);
+    }
+    for (const status of [199, 302, 429, 500]) expect(isRejectedHoldResponse(status, { data: { result: '0' } })).toBe(false);
+  });
+
+  it('cannot reset a dispatched hold merely because success has not been confirmed', () => {
+    const guard = new SafetyGuard(options({ mode: 'live', confirmed: true }));
+    expect(() => guard.resetRejectedReservation(plan)).toThrow('explicitly rejected');
+    guard.armReservation(plan);
+    guard.evaluate(plan.hold);
+    expect(guard.confirmedHoldRejection).toBe(false);
+    expect(() => guard.resetRejectedReservation(plan)).toThrow('explicitly rejected');
+    expect(() => guard.assertCanReserve()).toThrow('already dispatched');
   });
 });
 

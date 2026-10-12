@@ -1,8 +1,22 @@
 # 高千穗峽划船預約工具
 
-在 macOS Apple Silicon 上執行的 TypeScript／Playwright CLI，使用真正的 Chrome 或 Chromium 操作 [EIPrO 官方網站](https://eipro.jp/takachiho1/)。乘船日期、開賣時間、1–2 個獨立時段及各船個資都由 `config/config.local.json` 指定。範例目標為 **2026-10-26、10:00 與 10:30**。
+在 macOS Apple Silicon 上執行的 TypeScript／Playwright CLI，使用真正的 Chrome 或 Chromium 操作 [EIPrO 官方網站](https://eipro.jp/takachiho1/)。乘船日期、開賣時間、1–2 個獨立時段及各船個資都由 `config/config.local.json` 指定。範例目標為 **2026-10-24、10:00 與 10:30**（乘船時段為日本時間）。
 
-範例開放時間為 **2026-10-12 09:00:00 Asia/Tokyo = 2026-10-12 08:00:00 Asia/Taipei = 2026-10-12 00:00:00 UTC**；變更 local config 即可切換目標。正式模式為每個設定時段準備獨立瀏覽器程序與 BrowserContext，開放後各自查詢、選取、填寫客戶資料。使用兩時段時，一個失敗、變慢或成功，不會中止另一個。
+範例開放時間為 **2026-10-10 09:00:00 Asia/Tokyo = 2026-10-10 08:00:00 Asia/Taipei = 2026-10-10 00:00:00 UTC**，符合[官方乘船日前兩週日本時間 09:00 開放的規則](https://www.takachiho-kanko.info/boat/menu_pageLnk/)；監控截止為 **2026-10-10 10:00:00 Asia/Taipei**。變更 local config 即可切換目標。正式模式為每個設定時段準備獨立瀏覽器程序與 BrowserContext，開放後各自查詢、選取、填寫客戶資料。使用兩時段時，一個失敗、變慢或成功，不會中止另一個。
+
+## 目前本機設定：10/12 搶 10/26
+
+已有本機個資設定與安裝完成的套件時，在 Mac 終端執行：
+
+```bash
+cd /Users/zhi-honglee/projects/takachiho
+npm run doctor
+caffeinate -dimsu npm run live -- --confirm-reservation-side-effects
+```
+
+確認 doctor 顯示目標 `2026-10-26`、時段 `11:00 / 11:30`，開始查詢為 **2026-10-12 台灣 07:58**、開賣時間為 **08:00**、正常回應後等待 **750 ms**，並顯示「搶位設定檢查通過」。乘船時段為日本時間。缺少近期填表紀錄、顯示「待當次表單確認」仍可啟動。程式須提前啟動；預設在開始查詢前 120 秒預熱，07:58 起持續查詢，看到官方明確允許預約才搶位。已過開始查詢時間時會直接監控，持續至台灣 10:00；截止後須先在 local config 設定新的未來預約日期與監控時間才能再次啟動。已有 local config 不要重新複製 example，以免覆寫個資。
+
+取得船位並完成自動填表後，在同一終端輸入 `handoff 11:00` 或 `handoff 11:30`，再到對應瀏覽器完成最後確認與付款。保持終端及兩個瀏覽器開啟；`q` 會關閉瀏覽器並離開。
 
 2026-10-08 已在 Cloud 透過官方正常 UI 暫留一次、進入一份真實客戶表單，確認 9 個客戶欄位及人數選項；沒有填入個資、勾同意、送出或付款。範例已包含這些實際 mappings。**這次不是執行本 repo 的 hold adapter，也不是 Mac Autofill 驗證**；仍需在 Mac 的受保護 full rehearsal 中確認目前表單並實測填寫。真站範圍見 [REAL_SITE.md](docs/REAL_SITE.md)、[10/8 表單勘查](docs/FORM_20261008.md)，離線驗證見 [VALIDATION.md](docs/VALIDATION.md)。
 
@@ -30,7 +44,10 @@ npm run check
 {
   "targetDate": "2026-10-27",
   "releaseAt": "2026-10-13T08:00:00+08:00",
-  "slots": ["11:00", "11:30"]
+  "monitorFrom": "2026-10-13T07:58:00+08:00",
+  "monitorUntil": "2026-10-13T10:00:00+08:00",
+  "slots": ["11:00", "11:30"],
+  "polling": { "baseDelayMs": 750, "maxDelayMs": 20000 }
 }
 ```
 
@@ -38,6 +55,9 @@ npm run check
 | --- | --- |
 | `targetDate` | 日本當地的乘船日期，必填 `YYYY-MM-DD` |
 | `releaseAt` | 開賣的絕對時間，必填含時區的 ISO 字串；台北用 `+08:00`、日本用 `+09:00`，也可用 UTC `Z` |
+| `monitorFrom` | 開始持續查詢的時間，選填含時區的 ISO 字串，須早於或等於 `releaseAt`；未填則從開賣時間開始 |
+| `monitorUntil` | 正式模式必填的監控截止時間，須含時區且晚於 `releaseAt`；例如 `2026-10-09T10:00:00+08:00` 是台灣 10/9 10:00 |
+| `polling.baseDelayMs` | 每次正常回應後的基礎等待時間，最低 750 ms；仍有小幅隨機偏移，完整查詢週期還須加上網站回應時間 |
 | `slots` | 1–2 個不同的日本當地乘船時間，必填兩位數 `HH:mm`，須為官方實際提供的時段 |
 | `customers[時段]` | 各船對應的代表人、9 個 fields 與 mappings；key 必須與該 slot 完全相同 |
 
@@ -52,7 +72,7 @@ npm run check
 | `inspect` | 真站日曆、日期、設定時段、DOM、網路、session、畫面診斷 | 否 | 無 |
 | `rehearsal` | 真站設定時段獨立讀取，顯示將採用的 reservation action | 否 | 無 |
 | `full-rehearsal` | 真站選取單一可預約時段、客戶頁檢查、Autofill 驗證 | 是，一次 | `--slot`、`--confirm-reservation-side-effects` |
-| `live` | 在設定開賣時間啟動 1–2 個獨立 reservation flow | 是，每時段最多一次 | `--confirm-reservation-side-effects`、已驗證欄位 mapping |
+| `live` | 從設定開始時間持續監控 1–2 個時段至截止時間 | 是；只有明確失敗且確認額滿才能重試 | `--confirm-reservation-side-effects`、本機設定檢查；自動填表須核對當次 DOM |
 
 ```bash
 npm run doctor
@@ -64,7 +84,7 @@ npm run doctor -- --manual-customer-form
 npm run live -- --manual-customer-form --confirm-reservation-side-effects
 ```
 
-`YYYY-MM-DD` 請換成從 inspect 確認、目前已開放且有餘位的日期，`--slot` 改成 slots 中其中一個時間。full rehearsal **真的會占用一個時段**，只能在有此意圖時執行。範例目標 2026-10-26 在 10 月 12 日開放前沒有可執行的 hold，不能用這個未開放日期驗證客戶表單。
+`YYYY-MM-DD` 請換成從 inspect 確認、目前已開放且有餘位的日期，`--slot` 改成 slots 中其中一個時間。full rehearsal **真的會占用一個時段**，只能在有此意圖時執行。範例目標 2026-10-24 在 10 月 10 日開放前沒有可執行的 hold，不能用這個未開放日期驗證客戶表單。
 
 所有命令預設讀取 `config/config.local.json`，也接受 `--config <本機 JSON 路徑>`。`inspect`、`rehearsal`、`full-rehearsal` 可用 `--date`；`live` 完整使用 local config 的日期、開賣時間及時段。安全模式可加 `--headless` 或 `--close`，供非互動診斷使用；有 side effect 的模式必須保留可見瀏覽器。
 
@@ -133,7 +153,13 @@ full rehearsal 或 live 的客戶欄位填寫與 HTML 檢查通過後會建立 `
 caffeinate -dimsu npm run live -- --confirm-reservation-side-effects
 ```
 
-程式按 `warmupSeconds` 提前準備頁面，預設 120 秒；到設定開賣時間後，各 context 分別重新檢查自己的時段，依官方當前可預約資料建立一次性 hold action。兩時段時，一個慢 request 不會阻塞另一個。每個 slot 一旦開始 hold，就停止該 slot 的 polling；即使回應逾時也不重複 hold，避免不確定結果導致重複占用。另一個 slot 繼續。
+程式按 `warmupSeconds` 在開始查詢前提前準備頁面，預設 120 秒；到 `monitorFrom`（未填則 `releaseAt`）後，各 context 使用官方日曆 `refetchEvents` 重新查詢自己的時段。本機及 example 設定為 750 ms；省略 `polling.baseDelayMs` 時沿用原預設 1250 ms。正常查詢在回應完成後等待此基礎時間，保留小幅 jitter（750 ms 設定的正常等待約 750–863 ms）；完整週期另加網站回應時間。兩時段互不阻塞。
+
+開放前，只有有效且未報錯的日曆回應能將「時段尚未出現」識別為正常等待，維持基礎間隔，仍不允許搶位。若正常等待會跨過 `releaseAt`，會縮短該次等待，在開放時間重新查詢；若上一筆正常查詢於開放後才完成，會立即再查一次，請求不重疊。開放後仍未出現時段、未知資料、錯誤與 429 維持退避，`Retry-After` 不會因開放時間而縮短。
+
+live 不受 `polling.maxAttempts` 或固定 20 分鐘限制，持續至暫留成功、人工停止或 `monitorUntil`。截止後不發起新的查詢或 hold；截止前已送出的 hold 仍確認結果並保留頁面。截止前可以啟動 live，沒有開賣後 20 分鐘的啟動限制。設定於啟動時讀取；修改開始時間、間隔或截止時間後，下次啟動生效，`f` 只重新讀取個資／mappings。
+
+每次 hold 都只有一次請求能力。僅當精確請求收到 HTTP 2xx 且字串 `data.result === "0"`，原頁仍為日曆，重新查詢又確認同一服務／場次的 `is_full === true`，才清除這次失敗狀態並回到監控。成功、逾時、未知回應、資料不符及人工驗證均停止該時段；另一時段繼續。full rehearsal 仍只允許一次 hold。
 
 官方公開說明的 hold 為 **15 分鐘**，以伺服器規則為準。取得後立即檢查客戶頁與 Autofill，保留兩個流程；不要在兩頁使用瀏覽器返回／重新載入來重新選船。最後輸入 `handoff`，自行完成需要的後續流程。若只有其中一個成功，成功頁仍會保留。
 

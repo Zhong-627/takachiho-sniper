@@ -13,7 +13,7 @@ import { SafetyGuard, type GuardDecision, type RunMode } from '../src/safety.js'
 import { CUSTOMER_PATH, EIPRO_ORIGIN, EIPRO_READ_RULES, HOLD_PATH } from '../src/site-rules.js';
 import {
   CALENDAR_URL, SEARCH_PATH, ManualInterventionError, detectManualSignal,
-  openCalendar, parseAvailability, performReservation, probeAvailability, SiteInspectionRequiredError, type SiteEvent,
+  describeActionPlan, openCalendar, parseAvailability, performReservation, probeAvailability, SiteInspectionRequiredError, type SiteEvent,
 } from '../src/site.js';
 
 const targetDate = '2026-10-26';
@@ -95,6 +95,8 @@ function calendarHtml(state: Pick<Fixture, 'initialCaptcha' | 'skipRender' | 're
         void readCalendar().catch(() => {});
       };
       const order = {
+        TEMPORARY_HOLD_RESULT_FAILURE: '0',
+        TEMPORARY_HOLD_RESULT_SUCCESS: '1',
         isTemporaryHoldReservationOptionAvailable: () => true,
         makeOrderUrl(service, session, start, end) {
           const params = new URLSearchParams({service_cd: service, service_session_cd: session,
@@ -129,6 +131,7 @@ interface Fixture {
   navigationDelayMs: number;
   initialViewErrors: number;
   backgroundClassName: string | string[] | null;
+  onHold?: () => void;
 }
 
 async function fixture(browser: Browser, mode: RunMode): Promise<Fixture> {
@@ -166,6 +169,7 @@ async function fixture(browser: Browser, mode: RunMode): Promise<Fixture> {
         capture();
         const status = pathname === SEARCH_PATH ? state.searchStatus : 200;
         const payload = pathname === SEARCH_PATH ? { results: state.events, errors: [] } : { data: { result: state.holdResult } };
+        if (pathname === HOLD_PATH) state.onHold?.();
         const body = pathname === new URL(CALENDAR_URL).pathname ? calendarHtml(state)
           : pathname === CUSTOMER_PATH ? customerHtml : JSON.stringify(payload);
         const headers = { 'content-type': pathname === SEARCH_PATH || pathname === HOLD_PATH ? 'application/json' : 'text/html', 'retry-after': '2' };
@@ -245,7 +249,7 @@ describe.runIf(executable !== undefined)('offline browser adapter fixtures', () 
   });
 
   it('uses a different configured date and two arbitrary slots with their own customer data', async () => {
-    const config = parseConfig({ targetDate: '2026-11-03', releaseAt: '2026-10-20T08:00:00+08:00', slots: ['09:15', '11:45'],
+    const config = parseConfig({ targetDate: '2026-11-03', releaseAt: '2026-10-20T08:00:00+08:00', monitorUntil: '2026-10-20T10:00:00+08:00', slots: ['09:15', '11:45'],
       customers: Object.fromEntries(['09:15', '11:45'].map((slot, index) => [slot, {
         representativeName: `Synthetic Person ${index}`,
         fields: { representativeName: `Synthetic Person ${index}`, email: `fixture-${index}@example.invalid` },
@@ -283,7 +287,7 @@ describe.runIf(executable !== undefined)('offline browser adapter fixtures', () 
 
   it('missing history permits both live flows, and failed current-form validation retains one hold without interrupting the other slot', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'takachiho-live-form-'));
-    const config = parseConfig({ targetDate, releaseAt: '2026-10-12T09:00:00+09:00', slots: ['10:00', '10:30'],
+    const config = parseConfig({ targetDate, releaseAt: '2026-10-12T09:00:00+09:00', monitorUntil: '2026-10-12T10:00:00+08:00', slots: ['10:00', '10:30'],
       customers: Object.fromEntries(['10:00', '10:30'].map((slot, index) => [slot, {
         representativeName: `Synthetic Person ${index}`,
         fields: { representativeName: `Synthetic Person ${index}`, email: `fixture-${index}@example.invalid`, ...(index === 0 ? { extra: 'NEVER_ENTER_CARD' } : {}) },
@@ -335,11 +339,85 @@ describe.runIf(executable !== undefined)('offline browser adapter fixtures', () 
     const state = await fixture(browser, 'live');
     try {
       await openCalendar(state.page, targetDate, timeouts, vi.fn());
-      state.holdResult = '0';
+      state.holdResult = 'unknown';
       await expect(performReservation(state.page, fixtureEvents[0]!, state.guard, timeouts, vi.fn())).rejects.toMatchObject({ name: 'AmbiguousReservationError' });
       await expect(performReservation(state.page, fixtureEvents[0]!, state.guard, timeouts, vi.fn())).rejects.toThrow(/already dispatched/u);
       expect(state.requests.filter((request) => request.pathname === HOLD_PATH && request.decision.allowed)).toHaveLength(1);
       expect(state.guard.state.customerDispatched).toBe(false);
+    } finally { await state.context.close(); }
+  });
+
+  it('resumes monitoring only after exact rejection and fresh full state, then holds once when stock returns', async () => {
+    const state = await fixture(browser, 'live');
+    let holds = 0;
+    state.onHold = () => {
+      if (++holds === 1) state.events = fixtureEvents.map((event) => ({ ...event, is_full: true, reserve_possible: false, order_remain_amount: '0' }));
+    };
+    state.holdResult = '0';
+    try {
+      await openCalendar(state.page, targetDate, timeouts, vi.fn());
+      let current: SiteEvent | undefined;
+      const sleep = vi.fn(async () => { state.events = fixtureEvents; state.holdResult = '1'; });
+      const act = vi.fn(async () => {
+        const result = await performReservation(state.page, current!, state.guard, timeouts, vi.fn(), { resumeAfterSoldOut: true });
+        return result.status === 'sold-out'
+          ? { status: 'retry-monitoring' as const, reason: 'Confirmed rejected and sold out' }
+          : { status: 'customer-form-ready' as const };
+      });
+      const result = await pollSlot({ slot: '10:00', deadlineAtMs: Date.now() + 60_000, sleep,
+        probe: async () => { const result = await probeAvailability(state.page, targetDate, '10:00', timeouts, vi.fn()); current = result.event; return result; }, act });
+      expect(result.status).toBe('customer-form-ready');
+      expect(act).toHaveBeenCalledTimes(2);
+      expect(sleep).toHaveBeenCalledOnce();
+      expect(state.requests.filter((request) => request.pathname === HOLD_PATH && request.decision.allowed)).toHaveLength(2);
+      expect(state.requests.filter((request) => request.pathname === CUSTOMER_PATH && request.decision.allowed)).toHaveLength(1);
+      expect(state.guard.confirmedHoldRejection).toBe(false);
+      await expect(performReservation(state.page, fixtureEvents[0]!, state.guard, timeouts, vi.fn(), { resumeAfterSoldOut: true })).rejects.toThrow('already dispatched');
+      expect(() => state.guard.resetRejectedReservation(describeActionPlan(fixtureEvents[0]!))).toThrow('explicitly rejected');
+    } finally { await state.context.close(); }
+  });
+
+  it.each(['still-available', 'unknown', 'different-event', 'changed-contract'] as const)('does not rearm a rejected hold when fresh availability is %s', async (kind) => {
+    const state = await fixture(browser, 'live');
+    state.holdResult = '0';
+    state.onHold = () => {
+      if (kind === 'unknown') state.events = [];
+      if (kind === 'different-event') state.events = fixtureEvents.map((event) => ({ ...event, session_cd: 'different-session', is_full: true, reserve_possible: false }));
+    };
+    try {
+      await openCalendar(state.page, targetDate, timeouts, vi.fn());
+      if (kind === 'changed-contract') await state.page.evaluate(() => {
+        const site = window as unknown as { App: { Module: { Front: { Order: { TEMPORARY_HOLD_RESULT_FAILURE: string } } } } };
+        site.App.Module.Front.Order.TEMPORARY_HOLD_RESULT_FAILURE = 'changed';
+      });
+      await expect(performReservation(state.page, fixtureEvents[0]!, state.guard, timeouts, vi.fn(), { resumeAfterSoldOut: true })).rejects.toBeInstanceOf(SiteInspectionRequiredError);
+      expect(state.guard.state.holdDispatched).toBe(true);
+      expect(state.guard.state.customerDispatched).toBe(false);
+      await expect(performReservation(state.page, fixtureEvents[0]!, state.guard, timeouts, vi.fn())).rejects.toThrow('already dispatched');
+      expect(state.requests.filter((request) => request.pathname === HOLD_PATH && request.decision.allowed)).toHaveLength(1);
+    } finally { await state.context.close(); }
+  });
+
+  it('keeps a full-rehearsal hold one-shot even after confirmed sold-out rejection', async () => {
+    const state = await fixture(browser, 'full-rehearsal');
+    state.holdResult = '0';
+    state.onHold = () => { state.events = fixtureEvents.map((event) => ({ ...event, is_full: true, reserve_possible: false })); };
+    try {
+      await openCalendar(state.page, targetDate, timeouts, vi.fn());
+      expect((await performReservation(state.page, fixtureEvents[0]!, state.guard, timeouts, vi.fn())).status).toBe('sold-out');
+      expect(() => state.guard.resetRejectedReservation(describeActionPlan(fixtureEvents[0]!))).toThrow('explicitly rejected');
+      expect(state.guard.state.holdDispatched).toBe(true);
+    } finally { await state.context.close(); }
+  });
+
+  it('does not dispatch a hold when the cutoff is reached during action preparation', async () => {
+    const state = await fixture(browser, 'live');
+    try {
+      await openCalendar(state.page, targetDate, timeouts, vi.fn());
+      const result = await performReservation(state.page, fixtureEvents[0]!, state.guard, timeouts, vi.fn(), { deadlineAtMs: Date.now() - 1 });
+      expect(result.status).toBe('deadline-reached');
+      expect(state.guard.state.holdDispatched).toBe(false);
+      expect(state.requests.some((request) => request.pathname === HOLD_PATH)).toBe(false);
     } finally { await state.context.close(); }
   });
 

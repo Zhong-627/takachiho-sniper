@@ -9,6 +9,8 @@
 3. 日曆由 FullCalendar 3.9.0／官方 `App` module 管理，使用官方日期選取控制項與日視圖。
 4. 官方 JavaScript 使用 `POST /takachiho1/eventCalendars/search` 讀取指定日期範圍，以及 `POST /takachiho1/apiCalendars/api/holidays` 讀取假日資訊。POST method 本身不代表建立 reservation，這兩條的用途及 body 已從官方程式確認；工具只准其已驗證結構。
 5. 公開官方 `App.Module.Front.Order.link` 組成 `POST /takachiho1/apiServices/api/hold_slot`。只有 server JSON `data.result === "1"` 成功時，才導向 `GET /takachiho1/orders/add`。10/7 確認的是公開 source，沒有 hold；10/8 UI 勘查確認進入該頁及倒數，但沒有擷取獨立 hold HTTP 回應的時間／JSON，不以 UI 操作返回時間代替。
+
+2026-10-09 重新讀取公開 `app.module.front.order.js`，確認暫留結果常數：字串 `0` 為失敗、`1` 為成功、`8` 為搜尋期限過期、`9` 為不適用暫留。`0` 並不單獨證明額滿；程式須額外重新讀取同一場次的 `is_full`。官方 UI 會把缺少結果預設成失敗，本工具仍將缺少結果視為未知，禁止重試。契約摘要見 [hold-result-contract.json](evidence/hold-result-contract.json)。本次契約檢查只有公開 GET，沒有新增真站 hold。
 6. 10/8 正常 UI 先點日曆時段，開啟只讀詳情；「予約手続き」才是預約操作，「予約終了」不能預約。當次官方 constants 是 POPUP=1、ORDER=2、DETAIL=3。repo 使用經 guard 保護的官方 `Order.link` adapter，不因 UI popup 的 action type 就改成 2，也不新增未驗證的替代 hold 流程。
 
 ## 已確認的 DOM 與資料來源

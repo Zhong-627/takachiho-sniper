@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { assertReservationTargetsUnchanged, loadConfig, parseConfig, validateModeConfig, type CustomerConfig } from '../src/config.js';
+import { assertLiveMonitoringWindow, assertReservationTargetsUnchanged, loadConfig, monitoringStartMs, parseConfig, validateModeConfig, type CustomerConfig } from '../src/config.js';
 import { TEST_TARGET } from './fixtures/config.js';
 
 function configWith(overrides: Record<string, unknown> = {}) {
@@ -68,6 +68,24 @@ describe('strict local config', () => {
     expect(() => configWith({ polling: { baseDelayMs: 2000, maxDelayMs: 1000 } })).toThrow('at least baseDelayMs');
   });
 
+  it('accepts 750 ms pacing and keeps old files starting at release', () => {
+    const config = configWith({ polling: { baseDelayMs: 750 } });
+    expect(config.polling.baseDelayMs).toBe(750);
+    expect(monitoringStartMs(config)).toBe(Date.parse(config.releaseAt));
+    expect(() => configWith({ polling: { baseDelayMs: 749 } })).toThrow();
+  });
+
+  it('separates the early monitoring start from the release instant', () => {
+    const config = configWith({ monitorFrom: '2026-10-12T07:58:00+08:00' });
+    expect(monitoringStartMs(config)).toBe(Date.parse('2026-10-12T07:58:00+08:00'));
+    expect(config.releaseAt).toBe(TEST_TARGET.releaseAt);
+    expect(() => configWith({ monitorFrom: '2026-10-12T08:00:00+08:00' })).not.toThrow();
+  });
+
+  it.each(['2026-10-12T07:58:00', '2026-10-12T07:58:00+99:99', '2026-10-12T08:00:01+08:00'])('rejects invalid or post-release monitoring start %s', (monitorFrom) => {
+    expect(() => configWith({ monitorFrom })).toThrow('monitorFrom');
+  });
+
   it('rejects duplicate mappings before interacting with a browser', () => {
     expect(() => configWith({ customers: { '10:00': { mappings: [{ key: 'a', selector: '#one' }, { key: 'a', selector: '#two' }] } } })).toThrow('unique keys');
     expect(() => configWith({ customers: { '10:00': { mappings: [{ key: 'a', selector: '#one' }, { key: 'b', selector: '#one' }] } } })).toThrow('unique selectors');
@@ -92,7 +110,7 @@ describe('strict local config', () => {
     expect(() => validateModeConfig(liveConfig(), 'live', true)).not.toThrow();
     expect(() => validateModeConfig(liveConfig({ releaseAt: '2026-10-12T08:00:00+08:00' }), 'live', true)).not.toThrow();
     expect(() => validateModeConfig(liveConfig({ slots: ['10:00'] }), 'live', true)).not.toThrow();
-    const changed = liveConfig({ targetDate: '2026-11-03', releaseAt: '2026-10-20T08:00:00+08:00', slots: ['09:15', '11:45'],
+    const changed = liveConfig({ targetDate: '2026-11-03', releaseAt: '2026-10-20T08:00:00+08:00', monitorUntil: '2026-10-20T10:00:00+08:00', slots: ['09:15', '11:45'],
       customers: { '09:15': fixtureCustomer('Example Person A'), '11:45': fixtureCustomer('Example Person B') } });
     expect(() => validateModeConfig(changed, 'live', true)).not.toThrow();
     expect(changed.targetDate).toBe('2026-11-03');
@@ -118,6 +136,14 @@ describe('strict local config', () => {
     }
   });
 
+  it('freezes the effective monitoring start during customer reloads', () => {
+    const original = liveConfig({ monitorFrom: '2026-10-12T07:58:00+08:00' });
+    expect(() => assertReservationTargetsUnchanged(original, liveConfig({ monitorFrom: '2026-10-12T08:58:00+09:00' }))).not.toThrow();
+    expect(() => assertReservationTargetsUnchanged(liveConfig(), liveConfig({ monitorFrom: TEST_TARGET.releaseAt }))).not.toThrow();
+    expect(() => assertReservationTargetsUnchanged(original, liveConfig())).toThrow('預約目標已變更');
+    expect(() => assertReservationTargetsUnchanged(original, liveConfig({ monitorFrom: '2026-10-12T07:57:00+08:00' }))).toThrow('預約目標已變更');
+  });
+
   it('keeps reservation modes visible and checks separate representatives', () => {
     expect(() => validateModeConfig(liveConfig({ browser: { headless: true } }), 'live', true)).toThrow('visible browser');
     const config = liveConfig();
@@ -133,7 +159,6 @@ describe('strict local config', () => {
     config.customers['10:30']!.mappings = [];
     expect(() => validateModeConfig(config, 'live', true)).toThrow('representativeName mapping');
   });
-
   it('manual customer entry permits missing autofill inputs but keeps reservation safeguards', () => {
     const config = configWith({ customers: { '10:00': { representativeName: 'Example Person A' }, '10:30': { representativeName: 'Example Person B' } } });
     expect(() => validateModeConfig(config, 'live', true, undefined, true)).not.toThrow();
@@ -162,5 +187,23 @@ describe('strict local config', () => {
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it('requires an explicit live cutoff and validates timezone and release ordering', () => {
+    const missing = liveConfig({ monitorUntil: undefined });
+    expect(() => validateModeConfig(missing, 'live', true)).toThrow('monitorUntil');
+    expect(() => validateModeConfig(missing, 'inspect', false)).not.toThrow();
+    for (const monitorUntil of ['2026-10-12T10:00:00', '2026-10-12T10:00:00+99:99', '2026-10-12T07:59:59+08:00', '2026-10-12T08:00:00+08:00']) {
+      expect(() => liveConfig({ monitorUntil })).toThrow();
+    }
+  });
+
+  it('allows starting after the old 20-minute window but refuses the configured cutoff', () => {
+    const config = liveConfig();
+    expect(() => assertLiveMonitoringWindow(config, Date.parse('2026-10-12T09:30:00+08:00'))).not.toThrow();
+    for (const now of ['2026-10-12T10:00:00+08:00', '2026-10-12T10:00:01+08:00']) {
+      expect(() => assertLiveMonitoringWindow(config, Date.parse(now))).toThrow('deadline has elapsed');
+    }
+    expect(() => assertLiveMonitoringWindow(liveConfig({ monitorUntil: undefined }))).toThrow('monitorUntil');
   });
 });

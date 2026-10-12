@@ -113,9 +113,21 @@ describe('official availability schema', () => {
   });
 
   it('reports unknown when the target is absent instead of treating another date as success', () => {
-    expect(parseAvailability(payload([]), TARGET_DATE, '10:00').status).toBe('unknown');
+    expect(parseAvailability(payload([]), TARGET_DATE, '10:00')).toMatchObject({ status: 'unknown', targetAbsent: true });
     expect(parseAvailability(payload([event({ service_start_datetime: '2026/10/25 10:00:00', service_end_datetime: '2026/10/25 10:30:00' })]), TARGET_DATE, '10:00').status).toBe('unknown');
-    expect(parseAvailability(payload([event({ service_start_datetime: '2026/10/26 11:00:00', service_end_datetime: '2026/10/26 11:30:00' })]), TARGET_DATE, '10:00').status).toBe('unknown');
+    expect(parseAvailability(payload([event({ service_start_datetime: '2026/10/26 11:00:00', service_end_datetime: '2026/10/26 11:30:00' })]), TARGET_DATE, '10:00')).toMatchObject({ status: 'unknown', targetAbsent: true });
+  });
+
+  it('does not label malformed, errored or duplicate responses as normal target absence', () => {
+    for (const data of [
+      {}, payload([], ['search error']), payload([{}]),
+      payload([event({ service_start_datetime: 'invalid' })]),
+      payload([event(), event({ session_cd: 'duplicate' })]),
+    ]) {
+      const result = parseAvailability(data, TARGET_DATE, '10:00');
+      expect(result.status).toBe('unknown');
+      expect(result.targetAbsent).toBeUndefined();
+    }
   });
 
   it('reports unknown if official API errors accompany apparently available results', () => {

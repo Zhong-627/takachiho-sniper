@@ -3,7 +3,7 @@ import { createInterface } from 'node:readline/promises';
 import type { Browser, BrowserContext, Page } from 'playwright';
 import { launchSlotBrowser } from './browser.js';
 import { parseCli } from './cli-options.js';
-import { assertReservationTargetsUnchanged, loadConfig, parseConfig, ReservationTargetsChangedError, validateModeConfig, type AppConfig, type RunMode } from './config.js';
+import { assertLiveMonitoringWindow, assertReservationTargetsUnchanged, loadConfig, monitoringStartMs, parseConfig, ReservationTargetsChangedError, validateModeConfig, type AppConfig, type RunMode } from './config.js';
 import { createDiagnostics, type Diagnostics } from './diagnostics.js';
 import { prepareCustomerForm } from './customer-step.js';
 import { assertLiveReadiness, type LiveReadiness } from './readiness.js';
@@ -34,6 +34,7 @@ npm run live -- --manual-customer-form --confirm-reservation-side-effects
 npm run doctor
 安全模式可加 --headless --close。個資與觀察到的表單 mappings 只存本機。
 日期、開賣時間、1–2 個時段及各船個資由 local config 指定。時段使用日本當地 HH:mm。
+live 從 monitorFrom（未填則 releaseAt）監控至 monitorUntil；不受 maxAttempts 限制。
 缺少近期表單紀錄仍可啟動；自動填表前核對當次表單，異常時保留船位交由人工。
 --manual-customer-form 僅供 live／doctor 使用，客戶資料全部由人工填寫，停用 f。
 瀏覽器保留時：f [HH:mm] 重新載入個資並填寫目前已 hold 的表單；handoff [HH:mm] 交由人工；q 關閉。
@@ -125,7 +126,7 @@ async function main(): Promise<void> {
   };
   const config = await readLocalConfig();
   if (options.mode === 'doctor') {
-    console.log(JSON.stringify({ platform: process.platform, arch: process.arch, node: process.version, targetDate: config.targetDate, release: formatReleaseTimes(Date.parse(config.releaseAt)), slots: config.slots, channel: config.browser.channel }, null, 2));
+    console.log(JSON.stringify({ platform: process.platform, arch: process.arch, node: process.version, targetDate: config.targetDate, release: formatReleaseTimes(Date.parse(config.releaseAt)), monitorFrom: formatReleaseTimes(monitoringStartMs(config)), monitorUntil: config.monitorUntil ? formatReleaseTimes(Date.parse(config.monitorUntil)) : undefined, baseDelayMs: config.polling.baseDelayMs, slots: config.slots, channel: config.browser.channel }, null, 2));
     try {
       validateModeConfig(config, 'live', true, undefined, options.manualCustomerForm);
       const readiness = await assertLiveReadiness(config, undefined, undefined, options.manualCustomerForm);
@@ -141,15 +142,16 @@ async function main(): Promise<void> {
   let readiness: LiveReadiness | undefined;
   if (mode === 'live') {
     readiness = await assertLiveReadiness(config, undefined, undefined, options.manualCustomerForm);
-    if (Date.now() > Date.parse(config.releaseAt) + 20 * 60_000) throw new Error('The live release window has elapsed. Use inspect/rehearsal for diagnostics.');
+    assertLiveMonitoringWindow(config);
   }
   const secrets = personalSecrets(config);
   const diagnostics = await createDiagnostics(config.artifactsDir, mode, secrets);
   const abort = new AbortController();
   const slots = mode === 'full-rehearsal' ? [options.slot as string] : config.slots;
   const sessions = new Map(slots.map((slot) => [slot, { slot, active: true, handedOff: false } as Session]));
-  diagnostics.event('run_started', { mode, targetDate: config.targetDate, slots, release: formatReleaseTimes(Date.parse(config.releaseAt)), platform: process.platform, arch: process.arch, node: process.version });
+  diagnostics.event('run_started', { mode, targetDate: config.targetDate, slots, releaseAt: config.releaseAt, monitorFromAt: new Date(monitoringStartMs(config)).toISOString(), release: formatReleaseTimes(Date.parse(config.releaseAt)), monitorFrom: formatReleaseTimes(monitoringStartMs(config)), monitorUntil: config.monitorUntil, platform: process.platform, arch: process.arch, node: process.version });
   console.log(`模式 ${mode}；日期 ${config.targetDate}；時段 ${slots.join(' / ')}；診斷 ${diagnostics.dir}`);
+  if (mode === 'live') console.log(`開始查詢：${formatReleaseTimes(monitoringStartMs(config)).taipei}；監控截止：${formatReleaseTimes(Date.parse(config.monitorUntil!)).taipei}；正常查詢回應後等待約 ${config.polling.baseDelayMs} ms。`);
   if (readiness) { diagnostics.event('live_readiness', { ...readiness }); printFormReadiness(readiness); }
   const stop = (): void => { abort.abort(); console.log('已要求停止自動化，瀏覽器保留中。輸入 q 關閉。'); };
   process.on('SIGINT', stop);
@@ -186,22 +188,23 @@ async function main(): Promise<void> {
           await cancellableSleep(delayMs, abort.signal);
         }
       }
-      if (mode !== 'live' || Date.now() < Date.parse(config.releaseAt) - 5000) {
+      if (mode !== 'live' || Date.now() < monitoringStartMs(config) - 5000) {
         await diagnostics.snapshot(session.page, 'calendar-warmup', slot);
       } else log('warmup_screenshot_skipped', { reason: 'Keep the imminent release action free of screenshot work.' });
       if (mode === 'live') {
-        const warmupAt = Date.parse(config.releaseAt) - config.warmupSeconds * 1000;
+        const warmupAt = monitoringStartMs(config) - config.warmupSeconds * 1000;
         if (Date.now() < warmupAt) {
           await waitUntilRelease(warmupAt, { signal: abort.signal, onEvent: log });
           await openCalendar(session.page, config.targetDate, config.timeouts, log);
           log('session_warmed');
         }
-        await waitUntilRelease(config.releaseAt, { signal: abort.signal, onEvent: log });
+        await waitUntilRelease(monitoringStartMs(config), { signal: abort.signal, onEvent: log });
       }
       let currentEvent: SiteEvent | undefined;
       const outcome = await pollSlot({
         slot, signal: abort.signal, onEvent: log, retry: config.polling,
-        maxAttempts: options.attempts ?? (mode === 'inspect' ? 1 : mode === 'live' ? config.polling.maxAttempts : 3),
+        ...(mode === 'live' ? { deadlineAtMs: Date.parse(config.monitorUntil!), releaseAtMs: Date.parse(config.releaseAt) }
+          : { maxAttempts: options.attempts ?? (mode === 'inspect' ? 1 : 3) }),
         probe: async () => {
           let observation;
           try { observation = await probeAvailability(session.page!, config.targetDate, slot, config.timeouts, log); }
@@ -224,7 +227,14 @@ async function main(): Promise<void> {
           }
           if (!currentEvent) throw new Error('No validated current target event.');
           try {
-            await performReservation(session.page!, currentEvent, session.guard!, config.timeouts, log);
+            const reservation = await performReservation(session.page!, currentEvent, session.guard!, config.timeouts, log,
+              { ...(mode === 'live' ? { deadlineAtMs: Date.parse(config.monitorUntil!), resumeAfterSoldOut: true } : {}), signal: abort.signal });
+            if (reservation.status === 'deadline-reached') return { status: 'deadline-reached', reason: 'Monitoring ended before dispatching a hold.' };
+            if (reservation.status === 'sold-out') {
+              if (mode !== 'live') return { status: 'failed', reason: 'Rehearsal hold rejected; target confirmed sold out.' };
+              console.log(`[${slot}] 已確認暫留失敗且額滿，回到餘位監控。`);
+              return { status: 'retry-monitoring', reason: 'Exact hold explicitly rejected and same event freshly confirmed sold out.' };
+            }
             session.autofillEligible = true;
             return await fillSession(session, config, diagnostics, options.manualCustomerForm);
           } catch (error) {
@@ -235,7 +245,8 @@ async function main(): Promise<void> {
       });
       log('slot_outcome', { ...outcome });
       await diagnostics.snapshot(session.page, 'slot-finished', slot);
-      console.log(`[${slot}] ${outcome.status} (${outcome.attempts} 次讀取)。`);
+      console.log(outcome.status === 'deadline-reached' ? `[${slot}] 已到監控截止時間，停止查詢並保留頁面（${outcome.attempts} 次讀取）。`
+        : `[${slot}] ${outcome.status} (${outcome.attempts} 次讀取)。`);
       return outcome;
     } catch (error) {
       log('slot_error', { message: error instanceof ManualInterventionError || error instanceof SiteInspectionRequiredError ? error.message : 'Slot stopped after browser/navigation/config error. See sanitized network diagnostics.' });

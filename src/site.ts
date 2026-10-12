@@ -45,6 +45,8 @@ export interface SiteEvent {
 export interface SlotObservation {
   status: 'available' | 'unavailable' | 'unknown';
   reason: string;
+  /** Only a valid, error-free calendar response can establish target absence. */
+  targetAbsent?: true;
   event?: SiteEvent;
 }
 
@@ -121,7 +123,11 @@ export function parseAvailability(payload: unknown, targetDate: string, slot: st
     const start = dateTime(event?.service_start_datetime);
     return start?.date === targetDate && start.time === slot && typeof event?.service_start_datetime === 'string' && event.service_start_datetime.endsWith(':00');
   });
-  if (matches.length !== 1) return { status: 'unknown', reason: matches.length === 0 ? 'Target slot was not explicitly present in the current response.' : 'Multiple events match the target; manual inspection is required.' };
+  if (matches.length !== 1) return {
+    status: 'unknown',
+    reason: matches.length === 0 ? 'Target slot was not explicitly present in the current response.' : 'Multiple events match the target; manual inspection is required.',
+    ...(matches.length === 0 && body.results.every((value) => validEvent(value) !== undefined) ? { targetAbsent: true as const } : {}),
+  };
   const event = validEvent(matches[0]);
   if (!event) return { status: 'unknown', reason: 'Target event identifiers, time range, action type, or availability flags are unconfirmed.' };
   const available = positiveFlags.every((key) => event[key] === true) && negativeFlags.every((key) => event[key] === false);
@@ -370,10 +376,10 @@ export async function probeAvailability(page: Page, targetDate: string, slot: st
   return observation;
 }
 
-export interface ReservationResult { status: 'customer-form-ready'; plan: ReservationPlan }
+export interface ReservationResult { status: 'customer-form-ready' | 'sold-out' | 'deadline-reached'; plan: ReservationPlan }
 
 /** One official link invocation, with one exact one-shot network capability. Never retried. */
-export async function performReservation(page: Page, event: SiteEvent, guard: SafetyGuard, timeouts: SiteTimeouts, log: SiteLog): Promise<ReservationResult> {
+export async function performReservation(page: Page, event: SiteEvent, guard: SafetyGuard, timeouts: SiteTimeouts, log: SiteLog, options: { deadlineAtMs?: number; signal?: AbortSignal; resumeAfterSoldOut?: boolean } = {}): Promise<ReservationResult> {
   guard.assertCanReserve();
   await throwIfManual(page);
   const plan = createActionPlan(event);
@@ -382,6 +388,8 @@ export async function performReservation(page: Page, event: SiteEvent, guard: Sa
       jQuery?: (selector: string) => { fullCalendar: (operation: string) => unknown };
       App?: { Module?: { Front?: { Order?: {
         link?: unknown;
+        TEMPORARY_HOLD_RESULT_FAILURE?: unknown;
+        TEMPORARY_HOLD_RESULT_SUCCESS?: unknown;
         isTemporaryHoldReservationOptionAvailable?: () => boolean;
         makeOrderUrl?: (...parameters: string[]) => string;
       } } } };
@@ -391,6 +399,7 @@ export async function performReservation(page: Page, event: SiteEvent, guard: Sa
     return {
       hasLink: typeof order?.link === 'function',
       hasHold: order?.isTemporaryHoldReservationOptionAvailable?.() === true,
+      rejectionContractConfirmed: order?.TEMPORARY_HOLD_RESULT_FAILURE === '0' && order?.TEMPORARY_HOLD_RESULT_SUCCESS === '1',
       events: Array.isArray(events) ? events.map((value: Record<string, unknown>) => Object.fromEntries(keys.filter((key) => value[key] !== undefined).map((key) => [key, value[key]]))) : [],
     };
   }, [...eventKeys]);
@@ -409,6 +418,9 @@ export async function performReservation(page: Page, event: SiteEvent, guard: Sa
   const expected = new URL(plan.customerNavigation.url);
   official.searchParams.sort(); expected.searchParams.sort();
   if (official.href !== expected.href) throw new SiteInspectionRequiredError('Official customer URL differs from the verified exact request.');
+  if (options.signal?.aborted || (options.deadlineAtMs !== undefined && Date.now() >= options.deadlineAtMs)) {
+    return { status: 'deadline-reached', plan };
+  }
   guard.armReservation(plan);
   const started = performance.now();
   log('slot-selection', { slot: start.time, slotKey: plan.slotKey });
@@ -429,11 +441,26 @@ export async function performReservation(page: Page, event: SiteEvent, guard: Sa
       // Official JS navigates 10 ms after success. Chromium can evict the old
       // page's response body first; the guard parsed that exact response before
       // fulfilling it and authorizing customer navigation.
-      if (!guard.state.holdConfirmed) throw new AmbiguousReservationError('The hold response could not be verified; reservation will not be retried.');
-      result = '1';
+      if (!guard.state.holdConfirmed && !guard.confirmedHoldRejection) throw new AmbiguousReservationError('The hold response could not be verified; reservation will not be retried.');
+      result = guard.state.holdConfirmed ? '1' : '0';
       proof = 'network-guard';
     }
     log('hold-response', { slot: start.time, status: response.status(), result: typeof result === 'string' && /^[0189]$/u.test(result) ? result : 'unknown', proof, durationMs: performance.now() - started });
+    if (response.status() >= 200 && response.status() < 300 && result === '0' && guard.confirmedHoldRejection) {
+      // A false success flag alone is not proof. Require the exact rejected
+      // response, the original calendar page, and a new explicitly full event.
+      if (!runtime.rejectionContractConfirmed) throw new SiteInspectionRequiredError('The current official hold-result contract is unconfirmed; inspect the page manually.');
+      if (options.signal?.aborted || (options.deadlineAtMs !== undefined && Date.now() >= options.deadlineAtMs)) return { status: 'deadline-reached', plan };
+      if (page.url() !== CALENDAR_URL) throw new SiteInspectionRequiredError('A rejected hold left the verified calendar; inspect the page manually.');
+      const latest = await probeAvailability(page, start.date, start.time, timeouts, log);
+      if (latest.status !== 'unavailable' || !latest.event || latest.event.is_full !== true
+          || describeActionPlan(latest.event).hold.body !== plan.hold.body) {
+        throw new SiteInspectionRequiredError('Hold explicitly rejected, but the same event was not freshly confirmed sold out; inspect the page manually.');
+      }
+      if (options.resumeAfterSoldOut) guard.resetRejectedReservation(plan);
+      log('hold-rejected-sold-out', { slot: start.time, slotKey: plan.slotKey });
+      return { status: 'sold-out', plan };
+    }
     if (response.status() < 200 || response.status() >= 300 || result !== '1' || !guard.state.holdConfirmed) {
       throw new AmbiguousReservationError('The one-shot hold did not produce explicit success; automation stops without retrying reservation.');
     }
@@ -450,6 +477,7 @@ export async function performReservation(page: Page, event: SiteEvent, guard: Sa
     throw new AmbiguousReservationError('A hold succeeded but a recognizable customer form did not become ready. Keep the browser open for manual inspection.');
   } catch (error) {
     if (!guard.state.holdDispatched) guard.disarmReservation();
+    if (error instanceof SiteInspectionRequiredError && guard.confirmedHoldRejection) throw error;
     if (error instanceof ManualInterventionError || error instanceof AmbiguousReservationError) throw error;
     throw new AmbiguousReservationError('Reservation outcome is uncertain after the official action; keep the browser open and do not retry the hold.');
   }

@@ -4,18 +4,19 @@ import { cancellableSleep, throwIfAborted, type TimingReporter } from './time.js
 
 export type SlotProbeResult =
   | { status: 'available'; details?: Record<string, unknown> }
-  | { status: 'unavailable' | 'unknown'; reason?: string }
+  | { status: 'unavailable' | 'unknown'; reason?: string; targetAbsent?: true }
   | { status: 'limited'; retryAfterMs?: number; reason?: string }
   | { status: 'manual'; reason: string };
 
-export type ReservationActionResult = {
-  status: 'customer-form-ready' | 'manual' | 'ambiguous' | 'failed';
+type TerminalActionResult = {
+  status: 'customer-form-ready' | 'manual' | 'ambiguous' | 'failed' | 'deadline-reached';
   reason?: string;
 };
+export type ReservationActionResult = TerminalActionResult | { status: 'retry-monitoring'; reason: string };
 
 export interface SlotOutcome {
   slot: string;
-  status: ReservationActionResult['status'] | 'exhausted';
+  status: TerminalActionResult['status'] | 'exhausted';
   attempts: number;
   elapsedMs: number;
   reason?: string;
@@ -24,13 +25,18 @@ export interface SlotOutcome {
 export interface SlotPollingOptions {
   slot: string;
   probe: () => Promise<SlotProbeResult>;
-  /** Invoked at most once. Its caller owns the side-effect safety guard. */
+  /** Repeated only after retry-monitoring: caller verified rejection and sold-out state. */
   act: () => Promise<ReservationActionResult>;
   signal?: AbortSignal;
   onEvent?: TimingReporter;
   retry?: RetryPolicy;
   maxAttempts?: number;
   maxElapsedMs?: number;
+  /** When provided, replaces the default attempt/time budgets with an absolute cutoff. */
+  deadlineAtMs?: number;
+  /** Known release boundary during early monitoring; never overrides error pacing. */
+  releaseAtMs?: number;
+  wallNow?: () => number;
   sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
   monotonicNow?: () => number;
 }
@@ -45,17 +51,21 @@ export async function runIndependentSlots<Slot extends string, Result>(
 }
 
 /**
- * Poll only safe availability reads. Once an action begins this worker never
- * repeats it, including on timeout or a lost response: a hold may already exist.
+ * Poll safe availability reads. An action repeats only after explicit rejection
+ * and sold-out verification by its caller, never on timeout or a lost response.
  * Unknown availability can never become an action or a successful outcome.
  */
 export async function pollSlot(options: SlotPollingOptions): Promise<SlotOutcome> {
-  const maxAttempts = options.maxAttempts ?? 120;
-  const maxElapsedMs = options.maxElapsedMs ?? 20 * 60_000;
-  if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) throw new RangeError('maxAttempts must be positive');
-  if (!Number.isFinite(maxElapsedMs) || maxElapsedMs < 1) throw new RangeError('maxElapsedMs must be positive');
+  const continuous = options.deadlineAtMs !== undefined;
+  const maxAttempts = options.maxAttempts ?? (continuous ? Infinity : 120);
+  const maxElapsedMs = options.maxElapsedMs ?? (continuous ? Infinity : 20 * 60_000);
+  if (options.maxAttempts !== undefined && (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1)) throw new RangeError('maxAttempts must be positive');
+  if (options.maxElapsedMs !== undefined && (!Number.isFinite(maxElapsedMs) || maxElapsedMs < 1)) throw new RangeError('maxElapsedMs must be positive');
+  if (continuous && !Number.isFinite(options.deadlineAtMs)) throw new RangeError('Monitoring deadline must be finite');
+  if (options.releaseAtMs !== undefined && !Number.isFinite(options.releaseAtMs)) throw new RangeError('Release instant must be finite');
   const sleep = options.sleep ?? cancellableSleep;
   const now = options.monotonicNow ?? (() => performance.now());
+  const wallNow = options.wallNow ?? (() => Date.now());
   const started = now();
   const emit = (event: string, data: Record<string, unknown> = {}): void => {
     options.onEvent?.(event, { slot: options.slot, elapsedMs: now() - started, ...data });
@@ -65,16 +75,22 @@ export async function pollSlot(options: SlotPollingOptions): Promise<SlotOutcome
   });
   let lastReason: string | undefined;
   let backoffAttempt = 0;
+  const deadlineReached = (attempts: number): SlotOutcome => {
+    emit('monitoring_deadline_reached', { attempts, deadlineAtMs: options.deadlineAtMs });
+    return finish('deadline-reached', attempts, 'Configured monitoring deadline reached');
+  };
   emit('slot_worker_started');
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     throwIfAborted(options.signal);
+    if (continuous && wallNow() >= options.deadlineAtMs!) return deadlineReached(attempt - 1);
     if (now() - started >= maxElapsedMs) {
       emit('slot_polling_exhausted', { attempts: attempt - 1, reason: 'Polling time budget elapsed' });
       return finish('exhausted', attempt - 1, 'Polling time budget elapsed');
     }
     let retryAfterMs: number | undefined;
     let probeResult: SlotProbeResult;
+    const requestStartedAtMs = wallNow();
     emit('availability_request_started', { attempt });
     try {
       probeResult = await options.probe();
@@ -87,12 +103,16 @@ export async function pollSlot(options: SlotPollingOptions): Promise<SlotOutcome
       probeResult = { status: 'unknown', reason: lastReason };
     }
     throwIfAborted(options.signal);
+    // A response arriving after the cutoff must never trigger a new hold.
+    if (continuous && wallNow() >= options.deadlineAtMs!) return deadlineReached(attempt);
     if (probeResult.status === 'available') {
       emit('reservation_action_started', { attempt });
       try {
         const actionResult = await options.act();
         emit('reservation_action_finished', { attempt, status: actionResult.status, reason: actionResult.reason });
-        return finish(actionResult.status, attempt, actionResult.reason);
+        if (actionResult.status !== 'retry-monitoring') return finish(actionResult.status, attempt, actionResult.reason);
+        emit('reservation_returned_to_monitoring', { attempt, reason: actionResult.reason });
+        probeResult = { status: 'unavailable', reason: actionResult.reason };
       } catch (error) {
         // Even an abort after clicking must not trigger another hold action.
         const reason = error instanceof Error ? error.message : String(error);
@@ -106,16 +126,30 @@ export async function pollSlot(options: SlotPollingOptions): Promise<SlotOutcome
     }
     lastReason = probeResult.reason ?? lastReason;
     if (probeResult.status === 'limited') retryAfterMs = probeResult.retryAfterMs;
-    // Ordinary unavailable responses use steady pacing. Errors, unknown states
-    // and 429 responses grow their own per-slot backoff; no global lock is used.
-    backoffAttempt = probeResult.status === 'unavailable' ? 1 : backoffAttempt + 1;
+    // A valid calendar missing the target before release is ordinary waiting,
+    // never permission to reserve. Malformed/ambiguous reads and 429 still back off.
+    const beforeRelease = options.releaseAtMs !== undefined && requestStartedAtMs < options.releaseAtMs;
+    const steadyPacing = probeResult.status === 'unavailable'
+      || (beforeRelease && probeResult.status === 'unknown' && probeResult.targetAbsent === true);
+    backoffAttempt = steadyPacing ? 1 : backoffAttempt + 1;
     if (attempt === maxAttempts) {
       emit('slot_polling_exhausted', { attempts: attempt, reason: lastReason });
       return finish('exhausted', attempt, lastReason);
     }
-    const delayMs = retryDelayMs(backoffAttempt, options.retry, retryAfterMs);
-    const remainingMs = maxElapsedMs - (now() - started);
+    let delayMs = retryDelayMs(backoffAttempt, options.retry, retryAfterMs);
+    if (steadyPacing && beforeRelease && retryAfterMs === undefined) {
+      // Align one normal read with release instead of sleeping across it. If the
+      // preceding read finishes late, recheck immediately; never overlap reads.
+      delayMs = Math.min(delayMs, Math.max(0, options.releaseAtMs! - wallNow()));
+    }
+    const remainingMs = Math.min(maxElapsedMs - (now() - started), continuous ? options.deadlineAtMs! - wallNow() : Infinity);
     if (delayMs >= remainingMs) {
+      if (continuous) {
+        // Wait through the remaining window, without shortening server pacing
+        // to send another request just before the cutoff.
+        await sleep(Math.max(0, remainingMs), options.signal);
+        return deadlineReached(attempt);
+      }
       emit('slot_polling_exhausted', { attempts: attempt, reason: 'Next retry exceeds polling time budget', delayMs });
       return finish('exhausted', attempt, 'Next retry exceeds polling time budget');
     }

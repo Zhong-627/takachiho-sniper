@@ -76,6 +76,13 @@ export function isSuccessfulHoldResponse(status: number, payload: unknown): bool
   return typeof data === 'object' && data !== null && 'result' in data && data.result === '1';
 }
 
+/** Official TEMPORARY_HOLD_RESULT_FAILURE is the string '0'; missing data is unknown. */
+export function isRejectedHoldResponse(status: number, payload: unknown): boolean {
+  if (!Number.isInteger(status) || status < 200 || status >= 300 || typeof payload !== 'object' || payload === null || !('data' in payload)) return false;
+  const data = payload.data;
+  return typeof data === 'object' && data !== null && 'result' in data && data.result === '0';
+}
+
 function normalizedUrl(value: string): string {
   const url = new URL(value);
   url.hash = '';
@@ -138,12 +145,13 @@ function redactedUrl(value: string): string {
   }
 }
 
-/** One guard belongs to one slot/context. It cannot be rearmed once hold was dispatched. */
+/** One guard per slot/context; only an explicitly rejected hold can be reset. */
 export class SafetyGuard {
   private readonly options: GuardOptions;
   private plan: ReservationPlan | undefined;
   private holdDispatched = false;
   private holdConfirmed = false;
+  private holdRejected = false;
   private customerDispatched = false;
   private handedOff = false;
 
@@ -179,6 +187,21 @@ export class SafetyGuard {
 
   disarmReservation(): void {
     this.plan = undefined;
+  }
+
+  get confirmedHoldRejection(): boolean {
+    return this.holdDispatched && this.holdRejected && !this.holdConfirmed && !this.customerDispatched && !this.handedOff;
+  }
+
+  /** Caller must also verify fresh sold-out data for this exact event before resetting. */
+  resetRejectedReservation(plan: ReservationPlan): void {
+    if (this.options.mode !== 'live' || !this.confirmedHoldRejection || !this.plan || this.plan.slotKey !== plan.slotKey
+        || !exactRequestMatches(plan.hold, this.plan.hold)) {
+      throw new SafetyError('Only the exact explicitly rejected hold can return to monitoring.');
+    }
+    this.plan = undefined;
+    this.holdDispatched = false;
+    this.holdRejected = false;
   }
 
   get state(): Readonly<{ holdDispatched: boolean; holdConfirmed: boolean; customerDispatched: boolean; handedOff: boolean }> {
@@ -268,7 +291,8 @@ export class SafetyGuard {
           let payload: unknown;
           try { payload = await response.json(); } catch { /* Unknown is never success. */ }
           this.holdConfirmed = isSuccessfulHoldResponse(status, payload);
-          this.emit({ allowed: this.holdConfirmed, kind: 'hold', reason: this.holdConfirmed ? 'Official hold explicitly confirmed success.' : 'Official hold outcome unconfirmed; customer navigation remains blocked.', method: snapshot.method, url: redactedUrl(snapshot.url), ...(decision.slotKey ? { slotKey: decision.slotKey } : {}) });
+          this.holdRejected = isRejectedHoldResponse(status, payload);
+          this.emit({ allowed: this.holdConfirmed, kind: 'hold', reason: this.holdConfirmed ? 'Official hold explicitly confirmed success.' : this.holdRejected ? 'Official hold explicitly rejected; customer navigation remains blocked.' : 'Official hold outcome unconfirmed; customer navigation remains blocked.', method: snapshot.method, url: redactedUrl(snapshot.url), ...(decision.slotKey ? { slotKey: decision.slotKey } : {}) });
         }
         await route.fulfill({ response });
         await response.dispose();

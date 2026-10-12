@@ -1,0 +1,16 @@
+{
+  "observedAt": "2026-10-09",
+  "source": "https://eipro.jp/module/Front/js/app.module.front.order.js",
+  "publicConstants": {
+    "TEMPORARY_HOLD_RESULT_FAILURE": "0",
+    "TEMPORARY_HOLD_RESULT_SUCCESS": "1",
+    "TEMPORARY_HOLD_RESULT_NOT_SUPPORT": "9",
+    "TEMPORARY_HOLD_RESULT_ERROR_SOLOT_SEARCH_EXPIRED": "8"
+  },
+  "notes": [
+    "Zero means temporary hold failure, not necessarily sold out.",
+    "Missing result defaults to failure in official UI; the adapter treats missing data as unknown.",
+    "Automatic monitoring resumes only after an explicit matching HTTP 2xx string zero, unchanged result constants, no successful hold or customer navigation, and fresh is_full=true for the same exact event.",
+    "This public-source check issued no reservation request."
+  ]
+}
