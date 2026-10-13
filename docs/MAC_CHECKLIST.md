@@ -19,7 +19,7 @@ npm run doctor
 - [ ] 開啟 macOS「日期與時間」自動設定時間，確認系統時鐘與可靠來源一致。
 - [ ] 個資只在 `config/config.local.json`；`git status --short` 沒有出現此檔或 `.local/`／`artifacts/`。
 
-clone 後以 `open -e config/config.local.json` 或 `code config/config.local.json` 編輯。先核對 targetDate、releaseAt、1–2 個 slots，再填 `customers[時段]` 各自的 `representativeName` 及 9 個 fields，設定兩船時代表人不同；姓／名合併須與頂層代表人一致。範例已帶 10/8 觀察的 mappings，個資值都是空白。已有 local config 時不要用 cp 覆寫，手動合併新欄位與 mappings。細節見 [README 本機設定](../README.md#本機個資與-autofill) 與 [表單勘查](FORM_20261008.md)。
+clone 後以 `open -e config/config.local.json` 或 `code config/config.local.json` 編輯。先核對 targetDate、releaseAt、1–2 個 slots，再填 `customers[時段]` 各自的 `representativeName` 及 9 個 fields，設定兩船時代表人不同；姓／名合併須與頂層代表人一致。範例已帶 10/8 觀察的 mappings，個資值都是空白。已有 local config 時不要用 cp 覆寫，手動合併新欄位與 mappings。細節見 [乘客資料說明](CLI.md#本機個資與-autofill) 與 [表單勘查](FORM_20261008.md)。
 
 doctor 分別報告搶位設定與填表狀態。自動模式缺少完整 fields／mappings 仍須修正；缺少近期 receipt 只提示待當次表單確認，退出碼仍為 0。人工填表可使用 `npm run doctor -- --manual-customer-form`，僅需各船代表人及正確目標設定。
 
@@ -89,7 +89,7 @@ npm run rehearsal -- --date YYYY-MM-DD --attempts 3
 npm run doctor
 ```
 
-- [ ] doctor 輸出的 targetDate、1–2 個 slots 及台北／日本開賣時間均符合本次目標。releaseAt 必須含正確時區，customers key 與各 slot 相符；改目標方法見 [README](../README.md#更改預約日期與時間)。
+- [ ] doctor 輸出的 targetDate、1–2 個 slots 及台北／日本開賣時間均符合本次目標。releaseAt 必須含正確時區，customers key 與各 slot 相符；改目標方法見 [終端設定指南](CLI.md#更改預約日期與時間)。
 - [ ] doctor 的 `monitorFrom` 與 `baseDelayMs` 符合需求；提前查詢須另填 `monitorFrom`，保留真實開放時間。開始時間與間隔於下次啟動生效。
 - [ ] `monitorUntil` 含時區且晚於 releaseAt，doctor 顯示的台北截止時間符合需求。此值於啟動時讀取，儲存後下次啟動生效。
 - [ ] 若設定兩個 slot，使用不同真實代表人，對應官方多艘船規則。
