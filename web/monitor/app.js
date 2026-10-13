@@ -11,6 +11,10 @@ const elements = Object.fromEntries([
   'setting-schedule-reset',
   'slot-1-enabled', 'slot-1-time', 'slot-1-profile', 'slot-2-enabled', 'slot-2-time',
   'slot-2-profile', 'push-enable', 'push-test', 'push-disable', 'push-copy', 'push-feedback',
+  'progress-tab', 'settings-tab', 'progress-panel', 'settings-panel', 'settings-tab-dirty',
+  'status-heading', 'review-settings', 'run-actions', 'schedule-summary', 'slot-2-options',
+  'attention-banner', 'attention-title', 'attention-copy', 'attention-open',
+  'close-dialog', 'close-copy', 'close-confirm', 'close-cancel',
 ].map((id) => [id, document.getElementById(id)]));
 
 const phaseDetails = {
@@ -63,6 +67,43 @@ let pushSubscription = null;
 let pushBusy = false;
 let pushNeedsRenew = false;
 let pushSyncError = false;
+let activePanel = 'progress';
+let pendingCloseRunId = null;
+
+function selectDashboardPanel(panel, scroll = true, focus = false) {
+  if (!['progress', 'settings'].includes(panel)) return;
+  activePanel = panel;
+  for (const name of ['progress', 'settings']) {
+    elements[`${name}-panel`].hidden = name !== panel;
+    elements[`${name}-tab`].setAttribute('aria-selected', String(name === panel));
+    elements[`${name}-tab`].tabIndex = name === panel ? 0 : -1;
+  }
+  elements['status-heading'].textContent = panel === 'progress' ? '搶位進度' : '搶位設定';
+  if (focus) elements[`${panel}-tab`].focus({ preventScroll: true });
+  if (scroll) window.scrollTo({ top: 0, behavior: 'auto' });
+  renderAttention();
+}
+
+function renderAttention() {
+  const slot = ['ambiguous', 'manual', 'held', 'handed-off', 'failed']
+    .map((phase) => snapshot?.slots.find((item) => item.phase === phase)).find(Boolean);
+  const external = controlFresh() && control.externalRun;
+  elements['attention-banner'].hidden = !authenticated || (!slot && !external);
+  elements['attention-open'].hidden = activePanel === 'progress';
+  if (!slot && !external) return;
+  const outdated = slot && (dataStale() || snapshot.connection === 'ended');
+  elements['attention-banner'].classList.toggle('is-warning', Boolean(outdated || ['ambiguous', 'manual', 'failed'].includes(slot?.phase)));
+  if (slot) {
+    const [phase, description] = phaseDetails[slot.phase];
+    elements['attention-title'].textContent = `${outdated ? '最後記錄：' : ''}${slot.slot} ${phase}`;
+    elements['attention-copy'].textContent = outdated
+      ? '這是最後收到的狀態。請在 Mac 的原預約頁面確認目前船位與付款結果。'
+      : description;
+  } else {
+    elements['attention-title'].textContent = 'Mac 終端機執行中';
+    elements['attention-copy'].textContent = '此任務由 Mac 終端機啟動。請在原終端機停止、交接或結束。';
+  }
+}
 
 function validTime(value) {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 8640000000000000;
@@ -113,6 +154,9 @@ function showLogin(message = '', focus = false) {
   authGeneration += 1;
   stopConnection();
   authenticated = false;
+  document.body.classList.remove('dashboard-active');
+  if (elements['close-dialog'].open) elements['close-dialog'].close();
+  pendingCloseRunId = null;
   snapshot = null;
   lastReceivedAt = 0;
   slotViews = [];
@@ -134,20 +178,23 @@ function showLogin(message = '', focus = false) {
   pushNeedsRenew = false;
   pushSyncError = false;
   elements['control-form'].reset();
-  elements['control-feedback'].textContent = '';
+  controlFeedback('');
   elements['push-feedback'].textContent = '';
   renderControl();
   renderPush();
+  selectDashboardPanel('progress', false);
   setLoginFeedback(message);
   if (focus) elements.password.focus();
 }
 
 function showStatus() {
   authenticated = true;
+  document.body.classList.add('dashboard-active');
   elements['login-view'].hidden = true;
   elements['status-view'].hidden = false;
   elements.logout.hidden = false;
   elements.password.value = '';
+  selectDashboardPanel('progress', false);
   updateConnection();
   void refreshControl();
   void refreshPush();
@@ -213,24 +260,30 @@ function updateConnection() {
   renderControl();
 }
 
-function renderSnapshot() {
-  const run = snapshot.run;
+function renderOverview() {
+  const saved = !snapshot?.run && controlFresh() && !controlLocked() && settingsReady(control.settings) ? control.settings : null;
+  const run = snapshot?.run || saved;
   if (run && typeof run.targetDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(run.targetDate)) {
     const parsed = Date.parse(`${run.targetDate}T00:00:00+09:00`);
     elements['target-date'].textContent = Number.isFinite(parsed) ? dateFormatter.format(parsed) : '日期待確認';
-    elements['run-mode'].textContent = `${run.targetDate.slice(0, 4)} 年 · ${snapshot.connection === 'ended' ? '本次執行已結束' : '自動搶位進度'}`;
-    elements['monitor-from'].textContent = readableTime(run.monitorFrom, true);
-    elements['release-at'].textContent = readableTime(run.releaseAt, true);
-    elements['monitor-until'].textContent = readableTime(run.monitorUntil, true);
+    elements['run-mode'].textContent = `${run.targetDate.slice(0, 4)} 年 · ${saved ? '已儲存設定 · 尚未啟動' : snapshot.connection === 'ended' ? '本次執行已結束' : '自動搶位進度'}`;
+    for (const [id, key] of [['monitor-from', 'monitorFrom'], ['release-at', 'releaseAt'], ['monitor-until', 'monitorUntil']]) {
+      elements[id].textContent = readableTime(saved ? Date.parse(run[key]) : run[key], true);
+    }
   } else {
     elements['target-date'].textContent = '等待搶位程式';
     elements['run-mode'].textContent = '尚未收到執行資訊';
     ['monitor-from', 'release-at', 'monitor-until'].forEach((id) => { elements[id].textContent = '—'; });
   }
-  elements['demo-badge'].hidden = run?.id !== 'demo';
-  const cards = document.createDocumentFragment();
+  elements['demo-badge'].hidden = snapshot?.run?.id !== 'demo' && !control?.demo;
+}
+
+function renderSnapshot() {
+  renderOverview();
+  const previousViews = new Map(slotViews.map((view) => [view.slot.slot, view]));
   slotViews = snapshot.slots.slice(0, 10).map((slot) => {
-    const card = elements['slot-template'].content.firstElementChild.cloneNode(true);
+    const previous = previousViews.get(slot.slot);
+    const card = previous?.card || elements['slot-template'].content.firstElementChild.cloneNode(true);
     const [phase, description, tone] = phaseDetails[slot.phase];
     card.dataset.phase = slot.phase;
     card.querySelector('.slot-time').textContent = slot.slot;
@@ -240,22 +293,29 @@ function renderSnapshot() {
     card.querySelector('.attempts').textContent = Number.isFinite(slot.attempts) && slot.attempts >= 0 ? numberFormatter.format(slot.attempts) : '—';
     card.querySelector('.availability').textContent = Object.hasOwn(availabilityLabels, slot.availability) ? availabilityLabels[slot.availability] : '尚未查詢';
     card.querySelector('.response').textContent = typeof slot.responseMs === 'number' && Number.isFinite(slot.responseMs) && slot.responseMs >= 0 ? `${numberFormatter.format(Math.round(slot.responseMs))} ms` : '—';
-    cards.append(card);
     const handoff = card.querySelector('.slot-handoff');
     const handoffButton = card.querySelector('.handoff-button');
     handoffButton.setAttribute('aria-label', `${slot.slot} 交接到 Mac`);
-    handoffButton.addEventListener('click', () => void runControlCommand('handoff', slot.slot));
+    if (!previous) handoffButton.addEventListener('click', () => void runControlCommand('handoff', slot.slot));
     return {
-      slot, retry: card.querySelector('.retry'), updated: card.querySelector('.slot-updated'),
+      slot, card, retry: card.querySelector('.retry'), updated: card.querySelector('.slot-updated'),
       badge: card.querySelector('.phase-badge'), description: card.querySelector('.phase-description'),
       handoff, handoffButton,
     };
   });
-  elements.slots.replaceChildren(cards);
+  const currentCards = new Set(slotViews.map((view) => view.card));
+  for (const card of [...elements.slots.children]) {
+    if (!currentCards.has(card)) card.remove();
+  }
+  slotViews.forEach(({ card }, index) => {
+    const current = elements.slots.children[index];
+    if (current !== card) elements.slots.insertBefore(card, current || null);
+  });
   elements['empty-state'].hidden = snapshot.slots.length > 0;
   renderEvents();
   updateTimers();
   renderControlActions();
+  renderAttention();
 }
 
 function renderEvents() {
@@ -411,6 +471,9 @@ function renderControlActions() {
   elements['setting-schedule-reset'].disabled = !settingsAvailable || busy || locked || !defaultSchedule(elements['setting-date'].value);
   elements['control-stop'].disabled = !ready || busy || !control.worker || control.worker.closed || control.worker.automationStopped || control.externalRun;
   elements['control-close'].disabled = !ready || busy || !control.worker || control.worker.closed || control.externalRun;
+  elements['review-settings'].hidden = locked;
+  elements['review-settings'].disabled = !settingsAvailable || busy;
+  elements['run-actions'].hidden = !locked;
   for (const index of [1, 2]) {
     const selected = elements[`slot-${index}-enabled`].checked;
     elements[`slot-${index}-time`].disabled = !selected;
@@ -418,9 +481,11 @@ function renderControlActions() {
     elements[`slot-${index}-profile`].disabled = !selected;
     elements[`slot-${index}-profile`].required = selected;
   }
+  elements['slot-2-options'].hidden = !elements['slot-2-enabled'].checked;
+  elements['slot-2-enabled'].closest('.slot-choice').classList.toggle('is-disabled', !elements['slot-2-enabled'].checked);
   for (const view of slotViews) {
     const workerSlot = control?.worker?.slots.find((slot) => slot.slot === view.slot.slot);
-    view.handoff.hidden = !workerSlot || control.worker.closed || control.externalRun;
+    view.handoff.hidden = !workerSlot || control.worker.closed || control.externalRun || (!workerSlot.canHandoff && !workerSlot.handedOff);
     view.handoffButton.disabled = !ready || busy || !workerSlot?.canHandoff || workerSlot.handedOff;
     view.handoffButton.textContent = workerSlot?.handedOff ? '已交接 · 請在 Mac 繼續' : '交接到 Mac';
   }
@@ -457,7 +522,15 @@ function renderControl() {
   elements['control-state'].textContent = state;
   elements['control-note'].textContent = note;
   elements['settings-status'].textContent = settingsDirty ? '有未儲存的修改，請先儲存。' : settingsReady(control?.settings) ? '使用 Mac 已儲存的搶位設定' : '等待設定';
+  elements['settings-tab-dirty'].hidden = !settingsDirty;
+  const schedule = ['setting-monitor-from', 'setting-release-at', 'setting-monitor-until'].map((id) => {
+    const value = elements[id].value;
+    return value ? readableTime(Date.parse(`${value}+08:00`), true).replace('\n', ' ') : '—';
+  });
+  elements['schedule-summary'].textContent = schedule.join(' → ');
   renderControlActions();
+  renderOverview();
+  renderAttention();
 }
 
 async function refreshControl() {
@@ -492,6 +565,7 @@ async function refreshControl() {
 
 function controlFeedback(message, ok = false) {
   elements['control-feedback'].textContent = message;
+  elements['control-feedback'].hidden = !message;
   elements['control-feedback'].classList.toggle('control-feedback-ok', ok);
 }
 
@@ -519,10 +593,10 @@ function sameSettings(left, right) {
     && ['monitorFrom', 'releaseAt', 'monitorUntil'].every((key) => Date.parse(left[key]) === Date.parse(right[key]));
 }
 
-async function runControlCommand(command, slot) {
+async function runControlCommand(command, slot, confirmedRunId) {
   if (commandBusy || !controlFresh()) return;
   const epoch = controlEpoch;
-  const expectedRunId = control.worker?.runId;
+  const expectedRunId = command === 'close' ? confirmedRunId : control.worker?.runId;
   const expectedSettings = control.settings;
   let settings;
   if (command === 'settings') {
@@ -560,9 +634,10 @@ async function runControlCommand(command, slot) {
           : command === 'stop' ? control.worker?.runId === expectedRunId && control.worker.automationStopped
             : control.worker?.runId === expectedRunId && control.worker.slots.some((item) => item.slot === slot && item.handedOff);
     if (!verified) throw new UserMessage('操作已送出，但 Mac 尚未確認完成。請查看最新狀態或到 Mac 確認。');
+    if (command === 'start') selectDashboardPanel('progress', true, true);
     const messages = {
       settings: '設定已儲存。確認後即可開始搶位。',
-      start: 'Mac 搶位程式已啟動，請查看下方各時段進度。',
+      start: 'Mac 搶位程式已啟動，各時段進度會自動更新。',
       stop: '已停止自動搶位，預約頁面保留在 Mac。',
       close: '程式與預約瀏覽器已結束，控制台仍可使用。',
       handoff: `${slot} 已交接。請在 Mac 原本的瀏覽器填單、確認及付款；另一時段會依原設定繼續。`,
@@ -849,6 +924,26 @@ elements.refresh.addEventListener('click', () => {
   void refreshPush();
 });
 
+for (const name of ['progress', 'settings']) {
+  elements[`${name}-tab`].addEventListener('click', () => selectDashboardPanel(name));
+  elements[`${name}-tab`].addEventListener('keydown', (event) => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const next = event.key === 'Home' ? 'progress' : event.key === 'End' ? 'settings' : name === 'progress' ? 'settings' : 'progress';
+    selectDashboardPanel(next, true, true);
+  });
+}
+elements['review-settings'].addEventListener('click', () => selectDashboardPanel('settings', true, true));
+elements['attention-open'].addEventListener('click', () => selectDashboardPanel('progress', true, true));
+
+elements['control-form'].addEventListener('invalid', (event) => {
+  let details = event.target.closest('details');
+  while (details) {
+    details.open = true;
+    details = details.parentElement.closest('details');
+  }
+  controlFeedback('請檢查標示的欄位，填妥後再儲存設定。');
+}, true);
 elements['control-form'].addEventListener('input', (event) => {
   settingsDirty = true;
   if (event.target !== elements['setting-date'] || !updateScheduleForDate()) controlFeedback('');
@@ -868,7 +963,24 @@ elements['control-form'].addEventListener('submit', (event) => {
 });
 elements['control-start'].addEventListener('click', () => void runControlCommand('start'));
 elements['control-stop'].addEventListener('click', () => void runControlCommand('stop'));
-elements['control-close'].addEventListener('click', () => void runControlCommand('close'));
+elements['control-close'].addEventListener('click', () => {
+  if (elements['control-close'].disabled || !controlFresh() || elements['close-dialog'].open) return;
+  pendingCloseRunId = control.worker?.runId || null;
+  if (!pendingCloseRunId) return;
+  const held = control.worker.slots.filter((slot) => slot.holdConfirmed).map((slot) => slot.slot);
+  elements['close-copy'].textContent = `${held.length ? `${held.join('、')} 已暫留。` : ''}Mac 的預約瀏覽器會關閉。請先確認原頁面與船位；關閉瀏覽器不代表立即取消暫留船位。結束後才能修改設定或重新啟動。`;
+  elements['close-dialog'].showModal();
+});
+elements['close-cancel'].addEventListener('click', () => elements['close-dialog'].close());
+elements['close-dialog'].addEventListener('close', () => { pendingCloseRunId = null; });
+elements['close-confirm'].addEventListener('click', () => {
+  const runId = pendingCloseRunId;
+  elements['close-dialog'].close();
+  pendingCloseRunId = null;
+  if (!runId) return;
+  if (!controlFresh()) { controlFeedback('控制狀態已過期，請重新連線並確認本次執行後再結束。'); return; }
+  void runControlCommand('close', undefined, runId);
+});
 elements['push-enable'].addEventListener('click', () => void runPushCommand('subscribe'));
 elements['push-test'].addEventListener('click', () => void runPushCommand('test'));
 elements['push-disable'].addEventListener('click', () => void runPushCommand('unsubscribe'));

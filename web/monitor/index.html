@@ -60,7 +60,7 @@
 
         <section id="status-view" class="status-view" hidden aria-labelledby="status-heading">
           <div class="view-heading">
-            <div><p class="eyebrow">RESERVATION WATCH</p><h1 id="status-heading">每一步，都看得見。</h1></div>
+            <div><p class="eyebrow">RESERVATION WATCH</p><h1 id="status-heading">搶位進度</h1></div>
             <button id="refresh" class="secondary-button" type="button"><span aria-hidden="true">↻</span> 重新連線</button>
           </div>
 
@@ -70,82 +70,121 @@
             <span id="last-received" class="last-received"></span>
           </div>
 
-          <section id="control-panel" class="control-panel" aria-labelledby="control-heading">
-            <div class="panel-heading"><div><p class="eyebrow">PLAN YOUR RIDE</p><h2 id="control-heading">這次想搶哪一天？</h2></div><span id="control-state" class="control-state">正在取得設定</span></div>
-            <p id="control-demo" class="demo-notice" hidden>演示模式：設定及按鈕僅操作模擬進度，不會向官方網站搶位。</p>
-            <p id="control-note" class="panel-copy">選好日期與時段，再啟動 Mac 的搶位程式。</p>
-            <form id="control-form">
-              <fieldset id="control-fields" disabled>
-                <legend class="visually-hidden">搶位設定</legend>
-                <div class="setting-date"><label for="setting-date">乘船日期 · 日本時間</label><input id="setting-date" name="targetDate" type="date" required></div>
-                <div class="setting-slots">
-                  <div class="slot-choice">
-                    <label class="slot-check"><input id="slot-1-enabled" type="checkbox" checked><span>時段 1</span></label>
-                    <div><label for="slot-1-time">乘船時間 · 日本時間</label><input id="slot-1-time" type="time" required step="60"></div>
-                    <div><label for="slot-1-profile">乘客設定</label><select id="slot-1-profile" required></select></div>
+          <p id="control-demo" class="demo-notice" hidden>演示模式：設定及操作只會產生模擬進度，不會向官方網站搶位。</p>
+          <div id="attention-banner" class="attention-banner" role="status" aria-live="polite" aria-atomic="true" hidden>
+            <div><strong id="attention-title"></strong><p id="attention-copy"></p></div>
+            <button id="attention-open" class="secondary-button" type="button">查看進度與交接</button>
+          </div>
+          <p id="control-feedback" class="form-feedback" role="status" aria-live="polite" aria-atomic="true" hidden></p>
+
+          <nav id="dashboard-tabs" class="dashboard-tabs" role="tablist" aria-label="控制台分頁">
+            <button id="progress-tab" class="dashboard-tab" role="tab" type="button" aria-selected="true" aria-controls="progress-panel" tabindex="0"><svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span>進度</span></button>
+            <button id="settings-tab" class="dashboard-tab" role="tab" type="button" aria-selected="false" aria-controls="settings-panel" tabindex="-1"><svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M4 17h16M8 4v6M16 14v6"/></svg><span>設定</span><span id="settings-tab-dirty" class="tab-dirty" hidden>未儲存</span></button>
+          </nav>
+
+          <section id="progress-panel" class="dashboard-panel" role="tabpanel" aria-labelledby="progress-tab">
+            <section class="overview" aria-label="本次搶位設定">
+              <div class="target-date"><p class="eyebrow">乘船日期 · 日本時間</p><p id="target-date">等待搶位程式</p><span id="run-mode" class="muted">尚未收到執行資訊</span><br><span id="demo-badge" class="demo-badge" hidden>演示資料 · 未進行真實搶位</span></div>
+              <details class="run-schedule">
+                <summary>本次排程 · 台灣時間</summary>
+                <dl class="run-times">
+                  <div><dt>開始查詢</dt><dd id="monitor-from">—</dd></div>
+                  <div><dt>開賣時間</dt><dd id="release-at">—</dd></div>
+                  <div><dt>監控截止</dt><dd id="monitor-until">—</dd></div>
+                </dl>
+                <p class="timezone-note">上述時間以台灣時間顯示</p>
+              </details>
+            </section>
+
+            <div class="section-heading"><h2>乘船時段</h2><span>日本時間</span></div>
+            <div id="slots" class="slots" aria-label="各時段搶位狀態"></div>
+            <div id="empty-state" class="empty-state" hidden><span aria-hidden="true">⌁</span><h2>準備好，等待出發。</h2><p>Mac 啟動搶位程式後，各時段的進度會自動出現在這裡。</p></div>
+
+            <div class="progress-actions">
+              <button id="review-settings" class="primary-button" type="button" disabled>檢查設定並開始 <span aria-hidden="true">→</span></button>
+              <div id="run-actions" class="run-actions" hidden>
+                <button id="control-stop" class="secondary-button" type="button" disabled>停止查詢，保留頁面</button>
+                <details class="more-actions"><summary>更多操作</summary><button id="control-close" class="danger-button" type="button" disabled>結束並關閉瀏覽器</button><p class="field-hint">關閉後才能修改設定或重新啟動。關閉瀏覽器不代表立即取消暫留船位。</p></details>
+              </div>
+            </div>
+
+            <aside class="handoff-note"><span aria-hidden="true">↗</span><p><strong>已暫留，還需要最後一步。</strong><br>取得船位後，請回到 Mac 的預約瀏覽器完成確認與付款。</p></aside>
+
+            <details class="event-log">
+              <summary><span>最近動態</span><span id="event-count" class="muted">0 筆</span></summary>
+              <ol id="events" aria-label="最近搶位動態"></ol>
+              <p id="no-events" class="muted">收到新的搶位事件後，會顯示在這裡。</p>
+            </details>
+          </section>
+
+          <section id="settings-panel" class="dashboard-panel" role="tabpanel" aria-labelledby="settings-tab" hidden>
+            <section id="control-panel" class="control-panel" aria-labelledby="control-heading">
+              <div class="panel-heading"><div><p class="eyebrow">PLAN YOUR RIDE</p><h2 id="control-heading">這次想搶哪一天？</h2></div><span id="control-state" class="control-state">正在取得設定</span></div>
+              <p id="control-note" class="panel-copy">選好日期與時段，再啟動 Mac 的搶位程式。</p>
+              <form id="control-form">
+                <fieldset id="control-fields" disabled>
+                  <legend class="visually-hidden">搶位設定</legend>
+                  <div class="setting-date"><label for="setting-date">乘船日期 · 日本時間</label><label class="temporal-field" for="setting-date"><input id="setting-date" name="targetDate" type="date" required></label></div>
+                  <div class="setting-slots">
+                    <div class="slot-choice">
+                      <label class="slot-check"><input id="slot-1-enabled" type="checkbox" checked><span>時段 1</span></label>
+                      <div><label for="slot-1-time">乘船時間 · 日本時間</label><label class="temporal-field" for="slot-1-time"><input id="slot-1-time" type="time" required step="60"></label></div>
+                      <div><label for="slot-1-profile">乘客設定</label><select id="slot-1-profile" required></select></div>
+                    </div>
+                    <div class="slot-choice">
+                      <label class="slot-check"><input id="slot-2-enabled" type="checkbox"><span>時段 2</span></label>
+                      <div id="slot-2-options" class="slot-options" hidden>
+                        <div><label for="slot-2-time">乘船時間 · 日本時間</label><label class="temporal-field" for="slot-2-time"><input id="slot-2-time" type="time" step="60"></label></div>
+                        <div><label for="slot-2-profile">乘客設定</label><select id="slot-2-profile"></select></div>
+                      </div>
+                    </div>
                   </div>
-                  <div class="slot-choice">
-                    <label class="slot-check"><input id="slot-2-enabled" type="checkbox"><span>時段 2</span></label>
-                    <div><label for="slot-2-time">乘船時間 · 日本時間</label><input id="slot-2-time" type="time" step="60"></div>
-                    <div><label for="slot-2-profile">乘客設定</label><select id="slot-2-profile"></select></div>
-                  </div>
-                </div>
-                <p class="field-hint">請填官方實際提供的時段。只勾一列就只搶該時段；勾兩列會各自搶位，兩個都保留。</p>
-                <div class="schedule-fields">
-                  <div><label for="setting-monitor-from">開始查詢 · 台灣時間</label><input id="setting-monitor-from" type="datetime-local" required step="1" aria-describedby="schedule-hint"></div>
-                  <div><label for="setting-release-at">開賣時間 · 台灣時間</label><input id="setting-release-at" type="datetime-local" required step="1" aria-describedby="schedule-hint"></div>
-                  <div><label for="setting-monitor-until">監控截止 · 台灣時間</label><input id="setting-monitor-until" type="datetime-local" required step="1" aria-describedby="schedule-hint"></div>
-                </div>
-                <div class="schedule-defaults"><p id="schedule-hint" class="field-hint">更換日期會重新帶入乘船日前 14 天的台灣時間：07:48 開始查詢、07:55 開賣、10:05 截止。三欄皆可手動調整。</p><button id="setting-schedule-reset" class="secondary-button" type="button">重設為預設時間</button></div>
-                <details class="advanced-settings"><summary>進階設定</summary><div class="advanced-fields"><div><label for="setting-delay">查詢間隔基準（毫秒）</label><input id="setting-delay" type="number" min="750" max="60000" step="1" required></div><label class="slot-check"><input id="setting-manual" type="checkbox"><span>暫留後由我在 Mac 填寫乘客資料</span></label></div></details>
-              </fieldset>
-              <div class="settings-actions"><button id="control-save" class="secondary-button" type="submit" disabled>儲存設定</button><span id="settings-status" class="field-hint">等待設定</span></div>
-            </form>
-            <div class="control-actions"><button id="control-start" class="primary-button" type="button" disabled>開始搶位 <span aria-hidden="true">→</span></button><button id="control-stop" class="secondary-button" type="button" disabled>停止搶位 · 保留頁面</button><button id="control-close" class="danger-button" type="button" disabled>結束程式</button></div>
-            <p class="control-explanation">「開始搶位」會在 Mac 開啟瀏覽器，於設定時間嘗試在官方網站暫留船位。停止搶位會保留頁面；結束程式會關閉預約瀏覽器。Mac 需保持運作及連網。</p>
-            <p id="control-feedback" class="form-feedback" role="status" aria-live="polite" aria-atomic="true"></p>
+                  <p class="field-hint">請填官方實際提供的時段。只勾一列就只搶該時段；勾兩列會各自搶位，兩個都保留。</p>
+                  <details id="schedule-settings" class="schedule-settings">
+                    <summary><span>排程 · 台灣時間</span><span id="schedule-summary" class="schedule-summary">等待排程</span></summary>
+                    <div class="schedule-fields">
+                      <div><label for="setting-monitor-from">開始查詢 · 台灣時間</label><label class="temporal-field" for="setting-monitor-from"><input id="setting-monitor-from" type="datetime-local" required step="1" aria-describedby="schedule-hint"></label></div>
+                      <div><label for="setting-release-at">開賣時間 · 台灣時間</label><label class="temporal-field" for="setting-release-at"><input id="setting-release-at" type="datetime-local" required step="1" aria-describedby="schedule-hint"></label></div>
+                      <div><label for="setting-monitor-until">監控截止 · 台灣時間</label><label class="temporal-field" for="setting-monitor-until"><input id="setting-monitor-until" type="datetime-local" required step="1" aria-describedby="schedule-hint"></label></div>
+                    </div>
+                    <div class="schedule-defaults"><p id="schedule-hint" class="field-hint">更換日期會重新帶入乘船日前 14 天的台灣時間：07:48 開始查詢、07:55 開賣、10:05 截止。三欄皆可手動調整。</p><button id="setting-schedule-reset" class="secondary-button" type="button">重設為預設時間</button></div>
+                  </details>
+                  <details class="advanced-settings"><summary>進階設定</summary><div class="advanced-fields"><div><label for="setting-delay">查詢間隔基準（毫秒）</label><input id="setting-delay" type="number" min="750" max="60000" step="1" required></div><label class="slot-check"><input id="setting-manual" type="checkbox"><span>暫留後由我在 Mac 填寫乘客資料</span></label></div></details>
+                </fieldset>
+                <div class="settings-actions"><button id="control-save" class="secondary-button" type="submit" disabled>儲存設定</button><span id="settings-status" class="field-hint">等待設定</span></div>
+              </form>
+              <div class="control-actions"><button id="control-start" class="primary-button" type="button" disabled aria-describedby="settings-status">開始搶位 <span aria-hidden="true">→</span></button></div>
+              <p class="control-explanation">「開始搶位」會在 Mac 開啟瀏覽器，於設定時間嘗試暫留船位。Mac 需保持運作及連網；啟動後可在進度頁停止查詢或交接。</p>
+            </section>
+
+            <section class="push-panel" aria-labelledby="push-heading">
+              <div><p class="eyebrow">A LITTLE HEADS-UP</p><h2 id="push-heading">搶到船位，通知這台手機。</h2><p id="push-copy" class="panel-copy">官方確認暫留後提醒你回到 Mac 接手確認、填單及付款。</p></div>
+              <div class="push-actions"><button id="push-enable" class="secondary-button" type="button" disabled>啟用通知</button><button id="push-test" class="secondary-button" type="button" hidden>測試通知</button><button id="push-disable" class="text-button" type="button" hidden>停用這台裝置</button></div>
+              <p id="push-feedback" class="form-feedback" role="status" aria-live="polite" aria-atomic="true"></p>
+            </section>
+
           </section>
-
-          <section class="push-panel" aria-labelledby="push-heading">
-            <div><p class="eyebrow">A LITTLE HEADS-UP</p><h2 id="push-heading">搶到船位，通知這台手機。</h2><p id="push-copy" class="panel-copy">官方確認暫留後提醒你回到 Mac 接手確認、填單及付款。</p></div>
-            <div class="push-actions"><button id="push-enable" class="secondary-button" type="button" disabled>啟用通知</button><button id="push-test" class="secondary-button" type="button" hidden>測試通知</button><button id="push-disable" class="text-button" type="button" hidden>停用這台裝置</button></div>
-            <p id="push-feedback" class="form-feedback" role="status" aria-live="polite" aria-atomic="true"></p>
-          </section>
-
-          <section class="overview" aria-label="本次搶位設定">
-            <div class="target-date"><p class="eyebrow">乘船日期 · 日本時間</p><p id="target-date">等待搶位程式</p><span id="run-mode" class="muted">尚未收到執行資訊</span><br><span id="demo-badge" class="demo-badge" hidden>演示資料 · 未進行真實搶位</span></div>
-            <dl class="run-times">
-              <div><dt>開始查詢</dt><dd id="monitor-from">—</dd></div>
-              <div><dt>開賣時間</dt><dd id="release-at">—</dd></div>
-              <div><dt>監控截止</dt><dd id="monitor-until">—</dd></div>
-            </dl>
-            <p class="timezone-note">上述時間以台灣時間顯示</p>
-          </section>
-
-          <div class="section-heading"><h2>乘船時段</h2><span>日本時間</span></div>
-          <div id="slots" class="slots" aria-label="各時段搶位狀態"></div>
-          <div id="empty-state" class="empty-state" hidden><span aria-hidden="true">⌁</span><h2>準備好，等待出發。</h2><p>Mac 啟動搶位程式後，各時段的進度會自動出現在這裡。</p></div>
-
-          <aside class="handoff-note"><span aria-hidden="true">↗</span><p><strong>已暫留，還需要最後一步。</strong><br>取得船位後，請回到 Mac 的預約瀏覽器完成確認與付款。</p></aside>
-
-          <details class="event-log" open>
-            <summary><span>最近動態</span><span id="event-count" class="muted">0 筆</span></summary>
-            <ol id="events" aria-label="最近搶位動態"></ol>
-            <p id="no-events" class="muted">收到新的搶位事件後，會顯示在這裡。</p>
-          </details>
         </section>
         <noscript><p class="noscript-note">請啟用 JavaScript，才能登入並接收即時搶位進度。</p></noscript>
       </main>
       <footer class="site-footer"><span>TAKACHIHO RESERVATION WATCH</span><span>隨時查看 · 在 Mac 完成預約</span></footer>
     </div>
 
+    <dialog id="close-dialog" class="close-dialog" aria-labelledby="close-heading" aria-describedby="close-copy">
+      <h2 id="close-heading">結束這次執行？</h2>
+      <p id="close-copy">Mac 的預約瀏覽器會關閉。請先確認原頁面與暫留船位；關閉瀏覽器不代表立即取消船位。</p>
+      <div class="dialog-actions"><button id="close-cancel" class="secondary-button" type="button" autofocus>保留頁面</button><button id="close-confirm" class="danger-button" type="button">確認結束</button></div>
+    </dialog>
+
     <template id="slot-template">
       <article class="slot-card">
         <header class="slot-heading"><div><p class="slot-eyebrow">乘船時段</p><h3 class="slot-time"></h3></div><span class="phase-badge"></span></header>
         <p class="phase-description"></p>
-        <dl class="slot-metrics"><div><dt>查詢次數</dt><dd class="attempts"></dd></div><div><dt>最近結果</dt><dd class="availability"></dd></div><div><dt>回應時間</dt><dd class="response"></dd></div></dl>
-        <div class="slot-bottom"><span class="retry"></span><span class="slot-updated"></span></div>
-        <div class="slot-handoff" hidden><button class="handoff-button secondary-button" type="button">交接到 Mac</button><p class="field-hint">自動化交接後，在 Mac 原本的瀏覽器填單、確認及付款。</p></div>
+        <div class="slot-handoff" hidden><button class="handoff-button secondary-button" type="button">交接到 Mac</button><p class="field-hint">交接後，在 Mac 原本的瀏覽器填單、確認及付款。</p></div>
+        <details class="slot-details"><summary>查詢詳情</summary>
+          <dl class="slot-metrics"><div><dt>查詢次數</dt><dd class="attempts"></dd></div><div><dt>最近結果</dt><dd class="availability"></dd></div><div><dt>回應時間</dt><dd class="response"></dd></div></dl>
+          <div class="slot-bottom"><span class="retry"></span><span class="slot-updated"></span></div>
+        </details>
       </article>
     </template>
   </body>

@@ -75,13 +75,14 @@ function controlFixture() {
     worker: null as Worker | null, externalRun: false, error: null as string | null };
 }
 
-async function controlledPage(simulatedPush = false, status?: MonitorSnapshot, timezoneId?: string) {
+async function controlledPage(simulatedPush = false, status?: MonitorSnapshot, timezoneId?: string,
+  viewport = { width: 390, height: 844, isMobile: true }) {
   const control = controlFixture();
   if (status) control.demo = false;
   const commands: Array<{ command: string; body: Record<string, unknown> }> = [];
   const failures = new Set<string>();
   const pushSettings = { available: simulatedPush, publicKey: simulatedPush ? 'dGVzdA' : null };
-  const phoneContext = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, timezoneId });
+  const phoneContext = await browser.newContext({ viewport: { width: viewport.width, height: viewport.height }, isMobile: viewport.isMobile, timezoneId });
   if (simulatedPush) await phoneContext.addInitScript(() => {
     const state = { permissionRequests: 0, subscribed: false, subscribeCalls: 0, unsubscribeCalls: 0 };
     let keyBytes: ArrayBuffer | null = null;
@@ -144,6 +145,79 @@ async function controlledPage(simulatedPush = false, status?: MonitorSnapshot, t
   return { phone, phoneContext, control, commands, failures, phoneErrors, pushSettings };
 }
 
+async function openSettings(phone: Page, expandSchedule = true) {
+  await phone.locator('#settings-tab').click();
+  if (expandSchedule && !await phone.locator('#schedule-settings').evaluate((element) => (element as HTMLDetailsElement).open)) {
+    await phone.locator('#schedule-settings > summary').click();
+  }
+}
+
+async function requestClose(phone: Page) {
+  await phone.locator('#progress-tab').click();
+  if (!await phone.locator('details.more-actions').evaluate((element) => (element as HTMLDetailsElement).open)) {
+    await phone.locator('details.more-actions > summary').click();
+  }
+  await phone.locator('#control-close').click();
+  await expect.poll(() => phone.locator('#close-dialog').isVisible()).toBe(true);
+}
+
+async function expectControlFeedbackInViewport(phone: Page) {
+  const bounds = await phone.locator('#control-feedback').evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return { top: rect.top, bottom: rect.bottom, viewportHeight: window.innerHeight };
+  });
+  expect(bounds.top).toBeGreaterThanOrEqual(0);
+  expect(bounds.bottom).toBeLessThan(bounds.viewportHeight);
+}
+
+async function expectSettingFieldsToFit(phone: Page, disabled: boolean) {
+  const issues = await phone.locator('#control-fields').evaluate((fieldset, expectDisabled) => {
+    const issues: string[] = [];
+    const tolerance = 1;
+    const controls = Array.from(fieldset.querySelectorAll<HTMLInputElement | HTMLSelectElement>(
+      'input[type="date"], input[type="time"], input[type="datetime-local"], input[type="number"], select'));
+    for (const control of controls) {
+      const bounds = control.getBoundingClientRect();
+      if (!bounds.width || bounds.height < 44) issues.push(`${control.id}: touch target is ${bounds.width} × ${bounds.height}`);
+      if (control.matches(':disabled') !== expectDisabled) issues.push(`${control.id}: unexpected disabled state`);
+      const temporalField = control.closest('.temporal-field');
+      for (const box of temporalField ? [control, temporalField] : [control]) {
+        const fieldBounds = box.getBoundingClientRect();
+        const containers = new Set([box.parentElement, control.closest('.slot-choice'),
+          control.closest('.schedule-settings'), control.closest('#control-panel')]);
+        for (const container of containers) {
+          if (!container) continue;
+          const rect = container.getBoundingClientRect();
+          const style = getComputedStyle(container);
+          const spacing = (name: string) => Number.parseFloat(style.getPropertyValue(name)) || 0;
+          const content = {
+            left: rect.left + spacing('border-left-width') + spacing('padding-left'),
+            right: rect.right - spacing('border-right-width') - spacing('padding-right'),
+            top: rect.top + spacing('border-top-width') + spacing('padding-top'),
+            bottom: rect.bottom - spacing('border-bottom-width') - spacing('padding-bottom'),
+          };
+          if (fieldBounds.left < content.left - tolerance || fieldBounds.right > content.right + tolerance
+            || fieldBounds.top < content.top - tolerance || fieldBounds.bottom > content.bottom + tolerance) {
+            issues.push(`${control.id}${box === control ? '' : ' field border'}: outside ${container.id || container.className || container.tagName} content`);
+          }
+        }
+      }
+    }
+    for (const index of [1, 2]) {
+      const timeControl = fieldset.querySelector(`#slot-${index}-time`)!;
+      const time = (timeControl.closest('.temporal-field') || timeControl).getBoundingClientRect();
+      const profile = fieldset.querySelector(`#slot-${index}-profile`)!.getBoundingClientRect();
+      if (Math.min(time.right, profile.right) - Math.max(time.left, profile.left) > tolerance
+        && Math.min(time.bottom, profile.bottom) - Math.max(time.top, profile.top) > tolerance) {
+        issues.push(`slot ${index}: time and passenger controls overlap`);
+      }
+    }
+    if (document.documentElement.scrollWidth > window.innerWidth) issues.push('page scrolls horizontally');
+    return issues;
+  }, disabled);
+  expect(issues).toEqual([]);
+}
+
 async function captureControlScreenshots(phone: Page, name: string) {
   if (!process.env.MONITOR_SCREENSHOT_DIR) return;
   await mkdir(process.env.MONITOR_SCREENSHOT_DIR, { recursive: true });
@@ -165,9 +239,194 @@ async function scheduleValues(phone: Page): Promise<string[]> {
     .map((id) => phone.locator(`#${id}`).inputValue()));
 }
 
+it('opens progress after login, preserves settings drafts across tabs, and returns to progress after a verified start', async () => {
+  const { phone, phoneContext, control, commands, phoneErrors } = await controlledPage(false, idleControlStatus());
+  try {
+    await expect.poll(() => phone.locator('#dashboard-tabs').getAttribute('role')).toBe('tablist');
+    await expect.poll(() => phone.locator('#progress-tab').getAttribute('aria-selected')).toBe('true');
+    await expect.poll(() => phone.locator('#settings-tab').getAttribute('aria-selected')).toBe('false');
+    await expect.poll(() => phone.locator('#progress-tab').getAttribute('aria-controls')).toBe('progress-panel');
+    await expect.poll(() => phone.locator('#settings-tab').getAttribute('aria-controls')).toBe('settings-panel');
+    await expect.poll(() => phone.locator('#progress-panel').getAttribute('role')).toBe('tabpanel');
+    await expect.poll(() => phone.locator('#settings-panel').getAttribute('role')).toBe('tabpanel');
+    await expect.poll(() => phone.locator('#progress-panel').isVisible()).toBe(true);
+    await expect.poll(() => phone.locator('#settings-panel').isVisible()).toBe(false);
+    await expect.poll(() => phone.locator('#control-start').isVisible()).toBe(false);
+
+    await phone.locator('#review-settings').click();
+    await expect.poll(() => phone.locator('#settings-tab').getAttribute('aria-selected')).toBe('true');
+    await expect.poll(() => phone.locator('#control-start').isVisible()).toBe(true);
+    expect(await phone.locator('#schedule-settings').evaluate((element) => (element as HTMLDetailsElement).open)).toBe(false);
+    await phone.locator('#slot-1-time').fill('12:00');
+    await expect.poll(() => phone.locator('#settings-tab-dirty').isVisible()).toBe(true);
+    await expect.poll(() => phone.locator('#control-start').isDisabled()).toBe(true);
+    await phone.locator('#progress-tab').click();
+    await expect.poll(() => phone.locator('#settings-panel').isVisible()).toBe(false);
+    await expect.poll(() => phone.locator('#review-settings').isVisible()).toBe(true);
+    await expect.poll(() => phone.locator('#settings-tab-dirty').isVisible()).toBe(true);
+    await openSettings(phone, false);
+    expect(await phone.locator('#slot-1-time').inputValue()).toBe('12:00');
+    expect(commands).toEqual([]);
+    await phone.locator('#control-save').click();
+    await expect.poll(() => phone.locator('#control-start').isEnabled()).toBe(true);
+    await expect.poll(() => phone.locator('#settings-tab-dirty').isVisible()).toBe(false);
+    expect(control.settings.slots[0]?.slot).toBe('12:00');
+    await phone.locator('#control-start').click();
+    await expect.poll(() => phone.locator('#progress-tab').getAttribute('aria-selected')).toBe('true');
+    await expect.poll(() => phone.locator('#progress-panel').isVisible()).toBe(true);
+    await expect.poll(() => phone.locator('#settings-panel').isVisible()).toBe(false);
+    await expect.poll(() => phone.locator('#control-stop').isVisible()).toBe(true);
+    expect(commands.map(({ command }) => command)).toEqual(['settings', 'start']);
+    expect(phoneErrors).toEqual([]);
+  } finally { await phoneContext.close(); }
+}, 30_000);
+
+it('keeps both mobile tabs reachable at the bottom without horizontal overflow from 320 to 430 px', async () => {
+  const { phone, phoneContext, phoneErrors } = await controlledPage(false, idleControlStatus());
+  try {
+    await openSettings(phone);
+    for (const width of [320, 360, 390, 430]) {
+      await phone.setViewportSize({ width, height: 844 });
+      await phone.evaluate(() => window.scrollTo(0, 0));
+      const before = await phone.locator('#dashboard-tabs').boundingBox();
+      await phone.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+      const layout = await phone.locator('#dashboard-tabs').evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return { position: getComputedStyle(element).position, top: rect.top, bottom: rect.bottom,
+          viewportHeight: window.innerHeight, overflowing: document.documentElement.scrollWidth > window.innerWidth };
+      });
+      expect(layout.position).toBe('fixed');
+      expect(layout.top).toBeCloseTo(before!.y, 0);
+      expect(layout.bottom).toBeLessThanOrEqual(layout.viewportHeight);
+      expect(layout.bottom).toBeGreaterThanOrEqual(layout.viewportHeight - 2);
+      expect(layout.overflowing).toBe(false);
+      for (const tab of ['progress-tab', 'settings-tab']) {
+        const box = await phone.locator(`#${tab}`).boundingBox();
+        expect(box!.height).toBeGreaterThanOrEqual(44);
+        expect(box!.x).toBeGreaterThanOrEqual(0);
+        expect(box!.x + box!.width).toBeLessThanOrEqual(width);
+      }
+      await phone.locator('#progress-tab').click();
+      await expect.poll(() => phone.locator('#progress-panel').isVisible()).toBe(true);
+      expect(await phone.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+      await openSettings(phone);
+    }
+    expect(phoneErrors).toEqual([]);
+  } finally { await phoneContext.close(); }
+}, 30_000);
+
+it.each([
+  { width: 320, isMobile: true }, { width: 360, isMobile: true }, { width: 375, isMobile: true },
+  { width: 390, isMobile: true }, { width: 430, isMobile: true }, { width: 760, isMobile: false },
+  { width: 900, isMobile: false }, { width: 1280, isMobile: false },
+])('keeps setting fields inside their cards at $width px while editable and locked', async ({ width, isMobile }) => {
+  const { phone, phoneContext, control, commands, phoneErrors } = await controlledPage(false, idleControlStatus(), undefined,
+    { width, height: 900, isMobile });
+  try {
+    await openSettings(phone);
+    await phone.locator('details.advanced-settings > summary').click();
+    await phone.locator('#slot-2-enabled').uncheck();
+    await phone.locator('#slot-2-enabled').check();
+    await expectSettingFieldsToFit(phone, false);
+    await phone.locator('#setting-date').fill('2026-10-27');
+    await phone.locator('#slot-1-time').fill('12:00');
+    await phone.locator('#slot-1-profile').selectOption('customer2');
+    await phone.locator('#slot-2-time').fill('12:30');
+    await phone.locator('#slot-2-profile').selectOption('customer1');
+    await phone.locator('#setting-release-at').fill('2026-10-13T07:57');
+    await phone.locator('#setting-delay').fill('1200');
+    await phone.locator('#control-save').click();
+    await expect.poll(() => phone.locator('#control-start').isEnabled()).toBe(true);
+    expect(control.settings).toMatchObject({ targetDate: '2026-10-27', releaseAt: '2026-10-13T07:57+08:00', baseDelayMs: 1200,
+      slots: [{ slot: '12:00', customerProfile: 'customer2' }, { slot: '12:30', customerProfile: 'customer1' }] });
+    await phone.locator('#control-start').click();
+    await expect.poll(() => phone.locator('#progress-tab').getAttribute('aria-selected')).toBe('true');
+    await openSettings(phone);
+    await expectSettingFieldsToFit(phone, true);
+    expect(commands.map(({ command }) => command)).toEqual(['settings', 'start']);
+    expect(phoneErrors).toEqual([]);
+  } finally { await phoneContext.close(); }
+}, 30_000);
+
+it('requires confirmation to close the reservation browser and sends no close command when cancelled', async () => {
+  const { phone, phoneContext, control, commands, phoneErrors } = await controlledPage(false, idleControlStatus());
+  try {
+    await openSettings(phone, false);
+    await phone.locator('#control-start').click();
+    await expect.poll(() => phone.locator('#progress-tab').getAttribute('aria-selected')).toBe('true');
+    await requestClose(phone);
+    await expect.poll(() => phone.locator('#close-dialog').textContent()).toContain('瀏覽器');
+    await phone.locator('#close-cancel').click();
+    await expect.poll(() => phone.locator('#close-dialog').isVisible()).toBe(false);
+    expect(commands.map(({ command }) => command)).toEqual(['start']);
+    expect(control.worker?.closed).toBe(false);
+    await requestClose(phone);
+    await phone.locator('#close-confirm').click();
+    await expect.poll(() => control.worker?.closed).toBe(true);
+    await expect.poll(() => phone.locator('#close-dialog').isVisible()).toBe(false);
+    expect(commands.at(-1)).toEqual({ command: 'close', body: { runId: 'run-fixture-1' } });
+    expect(phoneErrors).toEqual([]);
+  } finally { await phoneContext.close(); }
+}, 30_000);
+
+it('allows tab navigation offline while disabling commands for the active worker', async () => {
+  const { phone, phoneContext, commands, phoneErrors } = await controlledPage(false, source.snapshot());
+  try {
+    await openSettings(phone, false);
+    await phone.locator('#control-start').click();
+    await expect.poll(() => phone.locator('#control-stop').isEnabled()).toBe(true);
+    const commandCount = commands.length;
+    await phoneContext.setOffline(true);
+    await expect.poll(() => phone.locator('#connection-title').textContent()).toContain('離線');
+    await expect.poll(() => phone.locator('#control-stop').isDisabled()).toBe(true);
+    await expect.poll(() => phone.locator('#control-close').isDisabled()).toBe(true);
+    await expect.poll(() => phone.getByRole('button', { name: '11:00 交接到 Mac' }).isDisabled()).toBe(true);
+    await phone.locator('#settings-tab').click();
+    await expect.poll(() => phone.locator('#settings-panel').isVisible()).toBe(true);
+    await expect.poll(() => phone.locator('#control-save').isDisabled()).toBe(true);
+    await expect.poll(() => phone.locator('#control-start').isDisabled()).toBe(true);
+    await phone.locator('#progress-tab').click();
+    await expect.poll(() => phone.locator('#progress-panel').isVisible()).toBe(true);
+    expect(commands).toHaveLength(commandCount);
+    expect(phoneErrors).toEqual([]);
+  } finally { await phoneContext.close(); }
+}, 30_000);
+
+it('reveals and focuses an invalid schedule field when saving from the collapsed schedule', async () => {
+  const { phone, phoneContext, commands, phoneErrors } = await controlledPage(false, idleControlStatus());
+  try {
+    await openSettings(phone);
+    await phone.locator('#setting-release-at').fill('');
+    await phone.locator('#schedule-settings > summary').click();
+    expect(await phone.locator('#schedule-settings').evaluate((element) => (element as HTMLDetailsElement).open)).toBe(false);
+    await phone.locator('#control-save').click();
+    await expect.poll(() => phone.locator('#schedule-settings').evaluate((element) => (element as HTMLDetailsElement).open)).toBe(true);
+    await expect.poll(() => phone.evaluate(() => document.activeElement?.id)).toBe('setting-release-at');
+    await expect.poll(() => phone.locator('#control-feedback').textContent()).toContain('檢查');
+    expect(commands).toEqual([]);
+    expect(phoneErrors).toEqual([]);
+  } finally { await phoneContext.close(); }
+}, 30_000);
+
+it('keeps duplicate-slot feedback in the phone viewport when saving from the bottom of settings', async () => {
+  const { phone, phoneContext, commands, phoneErrors } = await controlledPage(false, idleControlStatus());
+  try {
+    await openSettings(phone);
+    await phone.locator('#slot-2-time').fill('11:00');
+    await phone.locator('#control-save').scrollIntoViewIfNeeded();
+    expect(await phone.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+    await phone.locator('#control-save').click();
+    await expect.poll(() => phone.locator('#control-feedback').textContent()).toContain('兩個時段不能相同');
+    await expectControlFeedbackInViewport(phone);
+    expect(commands).toEqual([]);
+    expect(phoneErrors).toEqual([]);
+  } finally { await phoneContext.close(); }
+}, 30_000);
+
 it('fills Taipei schedules on date changes, preserves manual edits and saved hydration, and restores defaults on request', async () => {
   const { phone, phoneContext, control, commands, phoneErrors } = await controlledPage(false, idleControlStatus(), 'America/Los_Angeles');
   try {
+    await openSettings(phone);
     expect(await scheduleValues(phone)).toEqual(['2026-10-12T21:50', '2026-10-12T23:00', '2026-10-13T01:00']);
     await phone.locator('#setting-date').fill('2026-10-27');
     expect(await scheduleValues(phone)).toEqual(['2026-10-13T07:48', '2026-10-13T07:55', '2026-10-13T10:05']);
@@ -200,6 +459,7 @@ it('fills Taipei schedules on date changes, preserves manual edits and saved hyd
     await phone.locator('#password').fill(password);
     await phone.locator('#login-submit').click();
     await expect.poll(() => phone.locator('#control-start').isEnabled()).toBe(true);
+    await openSettings(phone);
     expect(await scheduleValues(phone)).toEqual(manual);
     expect(await phone.locator('#control-save').isDisabled()).toBe(true);
 
@@ -231,6 +491,7 @@ it.each([
 ])('subtracts 14 calendar days from $targetDate independently of device timezone $timezoneId', async ({ targetDate, scheduleDate, timezoneId }) => {
   const { phone, phoneContext, commands, phoneErrors } = await controlledPage(false, idleControlStatus(), timezoneId);
   try {
+    await openSettings(phone);
     expect(await phone.evaluate(() => Intl.DateTimeFormat().resolvedOptions().timeZone)).toBe(timezoneId);
     await phone.locator('#setting-date').fill(targetDate);
     expect(await scheduleValues(phone)).toEqual([
@@ -245,6 +506,7 @@ it('saves one selected slot or two independent slots with explicit Taipei schedu
   const fixture = await controlledPage();
   const { phone, phoneContext, control, commands, phoneErrors } = fixture;
   try {
+    await openSettings(phone);
     expect(await phone.locator('#control-demo').isVisible()).toBe(true);
     expect(await phone.locator('#slot-1-time').inputValue()).toBe('11:00');
     expect(await phone.locator('#setting-release-at').inputValue()).toBe('2026-10-12T23:00');
@@ -264,8 +526,10 @@ it('saves one selected slot or two independent slots with explicit Taipei schedu
     await expect.poll(() => phone.locator('#control-feedback').textContent()).toContain('頁面保留');
     expect(await phone.locator('#setting-date').isDisabled()).toBe(true);
     expect(control.worker?.closed).toBe(false);
-    await phone.locator('#control-close').click();
+    await requestClose(phone);
+    await phone.locator('#close-confirm').click();
     await expect.poll(() => phone.locator('#setting-date').isEnabled()).toBe(true);
+    await openSettings(phone);
     await phone.locator('#slot-2-enabled').check();
     await phone.locator('#slot-2-time').fill('12:00');
     await phone.locator('#slot-2-profile').selectOption('customer1');
@@ -296,6 +560,7 @@ it('keeps ride settings editable when the latest run is historical and no worker
   const { phone, phoneContext, control, commands, phoneErrors } = await controlledPage(false, status);
   try {
     await expect.poll(() => phone.locator('.phase-badge').first().textContent()).toContain('最後：已停止');
+    await openSettings(phone);
     expect(control).toMatchObject({ enabled: true, busy: false, worker: null, externalRun: false });
     for (const id of ['setting-date', 'setting-monitor-from', 'setting-release-at', 'setting-monitor-until', 'slot-1-time', 'slot-2-time']) {
       expect(await phone.locator(`#${id}`).isEnabled()).toBe(true);
@@ -323,11 +588,16 @@ it('keeps ride settings editable when the latest run is historical and no worker
 it('reports start, Mac handoff, and stop failures without claiming success, and hands off only the selected slot', async () => {
   const { phone, phoneContext, control, commands, failures, phoneErrors } = await controlledPage();
   try {
+    await openSettings(phone);
     failures.add('start');
+    await phone.locator('#control-start').scrollIntoViewIfNeeded();
+    expect(await phone.evaluate(() => window.scrollY)).toBeGreaterThan(0);
     await phone.locator('#control-start').click();
     await expect.poll(() => phone.locator('#control-feedback').textContent()).toContain('start 未完成');
+    await expectControlFeedbackInViewport(phone);
     expect(control.worker).toBeNull();
     expect(await phone.locator('#control-start').isEnabled()).toBe(true);
+    expect(await phone.locator('#settings-tab').getAttribute('aria-selected')).toBe('true');
     failures.delete('start');
     await phone.locator('#control-start').click();
     await expect.poll(() => phone.getByRole('button', { name: '11:00 交接到 Mac' }).isEnabled()).toBe(true);
@@ -356,6 +626,7 @@ it('requests notification permission only on the enable gesture and confirms sub
   const pushCommands: Array<{ command: string; body: Record<string, unknown> }> = [];
   let testFailureStatus = 503;
   try {
+    await openSettings(phone, false);
     await phone.route(/\/api\/push\/[^/?]+$/, async (route) => {
       const command = new URL(route.request().url()).pathname.split('/').at(-1)!;
       pushCommands.push({ command, body: route.request().postDataJSON() as Record<string, unknown> });
@@ -395,6 +666,7 @@ it('rolls back a rejected new push subscription, retries an unregistered device,
   const { phone, phoneContext, pushSettings } = await controlledPage(true);
   let rejectSubscribe = true;
   try {
+    await openSettings(phone, false);
     await phone.route(/\/api\/push\/subscribe$/, (route) => route.fulfill({ status: rejectSubscribe ? 503 : 200, json: rejectSubscribe ? { error: '通知登記失敗。' } : { ok: true } }));
     const state = () => phone.evaluate(() => Reflect.get(window, 'pushFixture') as { permissionRequests: number; subscribed: boolean; subscribeCalls: number; unsubscribeCalls: number });
     await expect.poll(() => phone.locator('#push-enable').isEnabled()).toBe(true);
@@ -430,6 +702,7 @@ it('rolls back a rejected new push subscription, retries an unregistered device,
 it('never sends controls to an external run or a replacement run, and does not invent missing settings', async () => {
   const { phone, phoneContext, control, commands } = await controlledPage();
   try {
+    await openSettings(phone);
     control.externalRun = true;
     await phone.locator('#refresh').click();
     await expect.poll(() => phone.locator('#control-note').textContent()).toContain('原終端機');
@@ -440,9 +713,10 @@ it('never sends controls to an external run or a replacement run, and does not i
     await expect.poll(() => phone.locator('#control-start').isEnabled()).toBe(true);
     await phone.locator('#control-start').click();
     await expect.poll(() => phone.locator('#control-close').isEnabled()).toBe(true);
+    await requestClose(phone);
     control.worker!.runId = 'replacement-run';
     const commandCount = commands.length;
-    await phone.locator('#control-close').click();
+    await phone.locator('#close-confirm').click();
     await expect.poll(() => phone.locator('#control-feedback').textContent()).toContain('狀態已變更');
     expect(commands.length).toBe(commandCount);
     await phone.route(/\/api\/control$/, (route) => route.fulfill({ json: { enabled: false, demo: false, busy: false, settings: null, profiles: [], worker: null, externalRun: false, error: '請在 Mac 準備本機搶位設定。' } }));
@@ -456,6 +730,7 @@ it('never sends controls to an external run or a replacement run, and does not i
 it('keeps Mac handoff, stop, and close usable for an active worker when local settings become unreadable', async () => {
   const { phone, phoneContext, control } = await controlledPage();
   try {
+    await openSettings(phone);
     await phone.locator('#control-start').click();
     await expect.poll(() => phone.getByRole('button', { name: '11:00 交接到 Mac' }).isEnabled()).toBe(true);
     await phone.route(/\/api\/control$/, (route) => route.fulfill({ json: {
@@ -474,7 +749,8 @@ it('keeps Mac handoff, stop, and close usable for an active worker when local se
     await phone.locator('#control-stop').click();
     await expect.poll(() => phone.locator('#control-feedback').textContent()).toContain('頁面保留');
     expect(await phone.locator('#control-close').isEnabled()).toBe(true);
-    await phone.locator('#control-close').click();
+    await requestClose(phone);
+    await phone.locator('#close-confirm').click();
     await expect.poll(() => phone.locator('#control-feedback').textContent()).toContain('瀏覽器已結束');
     expect(control.worker?.closed).toBe(true);
     expect(await phone.locator('#setting-date').isDisabled()).toBe(true);
