@@ -61,7 +61,7 @@ npm run check
 | `slots` | 1–2 個不同的日本當地乘船時間，必填兩位數 `HH:mm`，須為官方實際提供的時段 |
 | `customers[時段]` | 各船對應的代表人、9 個 fields 與 mappings；key 必須與該 slot 完全相同 |
 
-例如把原 `customers["10:00"]`、`customers["10:30"]` 的 key 改為 `"11:00"`、`"11:30"`，保留各船自己的個資與已確認的 mappings。只預約一艘時，slots 可為 `["11:00"]`；未列入 slots 的客戶設定不會啟動預約。程式不自動推算開賣日，也不因時間格式合法就認定網站有該時段，仍須核對官方 availability。漏填日期、開賣時間或 slots 會報錯，不會使用舊目標。
+例如把原 `customers["10:00"]`、`customers["10:30"]` 的 key 改為 `"11:00"`、`"11:30"`，保留各船自己的個資與已確認的 mappings。只預約一艘時，slots 可為 `["11:00"]`；未列入 slots 的客戶設定不會啟動預約。CLI 不自動推算設定檔中的開賣日，也不因時間格式合法就認定網站有該時段，仍須核對官方 availability。漏填日期、開賣時間或 slots 會報錯，不會使用舊目標。
 
 儲存後執行 `npm run doctor`，核對輸出的 targetDate、slots 及台北／日本開賣時間。doctor 分別報告搶位設定與各時段的填表狀態；缺少近期相符的 Autofill receipt 只會提示「待當次表單確認」，不阻止啟動。正式 `live` 的目標全部取自設定檔，不接受 `--date`／`--slot` 覆寫。執行中 `f` 只可重新載入個資及 mappings；若日期、開賣時間或 slots 已變更，會停止填寫並保留原頁，先確認既有 hold 狀態再另行啟動。
 
@@ -181,9 +181,11 @@ live 不受 `polling.maxAttempts` 或固定 20 分鐘限制，持續至暫留成
 
 診斷包含 DOM metadata、當前時段資訊、navigation timing、Cookie／session metadata 及 screenshots；不輸出 Cookie 值、action token、POST body 或個資。客戶頁 screenshots 會遮蔽輸入欄位；人工填寫與官方頁面仍可能顯示其他敏感資訊，分享前須人工檢查。工具不保存 storageState、HAR、Playwright trace 或完整客戶頁 HTML。
 
-## 手機查看搶位進度（PWA）
+## 手機搶位控制台與通知（PWA）
 
-只讀監控畫面可透過現有 Mac 的 Tailscale Funnel 提供 HTTPS 網址，手機不用安裝 Tailscale，也不用自備網域。監控服務獨立讀取 `artifacts/` 的最新正式搶位事件，沒有啟動／停止搶位或付款按鈕。各時段分別顯示查詢、重試、暫留、填表及人工接手狀態；「已暫留」不代表預約完成。
+控制台透過 Mac 的 Tailscale Funnel 提供 HTTPS 網址，手機不用安裝 Tailscale，也不用自備網域。登入後可選日期、一或兩個時段，儲存台灣時間的查詢／開賣／截止排程，再啟動搶位；兩個時段各自搶，成功一個不會取消另一個。可停止並保留頁面、結束瀏覽器，或按各時段「交接到 Mac」在 Mac 原瀏覽器填單付款。「已暫留」不代表預約完成。
+
+選擇或更換乘船日期時，前端會重新帶入三個台灣時間：乘船日前 14 天 **07:48 開始查詢、07:55 開賣、10:05 監控截止**。三欄都可手動調整，或按「重設為預設時間」恢復；再次更換日期會覆寫三欄的手動值。只修改乘船時段、乘客資料組或重新載入已儲存設定時，會保留原排程。這是自訂的前端監控預設值；官方開賣規則仍為乘船日前兩週日本 09:00（台灣 08:00），實際開放以官方為準。
 
 第一次設定並啟動（不會執行搶位）：
 
@@ -200,13 +202,20 @@ npm run monitor:funnel
 
 從手機開啟印出的 HTTPS 網址，使用 `.local/monitor-password.txt` 內的密碼登入，再加入主畫面。預設本機監控 port 為 **4174**、Funnel HTTPS port 為 **8443**，不會覆寫已被其他服務使用的 Funnel port。既有 443 服務保持原設定。密碼與雜湊設定檔都已被 Git 排除，權限為 `0600`；設定命令不會印出密碼。服務重新啟動或重設密碼後需再次登入。
 
-之後在原本的終端照常啟動 `live`，PWA 會自動追蹤最新正式執行。`npm run monitor:status` 檢查常駐服務，`npm run monitor:stop` 停止服務並停用自動啟動，再執行 `monitor:start` 可恢復。監控服務不讀取 `config.local.json` 或公開原始診斷、個資、screenshots。頁面或程式心跳中斷會標示資料過期，不會把舊資料當成仍在執行。詳細操作、演示模式、停止單一 Funnel 入口與自訂路徑見 [MONITOR.md](docs/MONITOR.md)。
+手機按「開始搶位」後，獨立 worker 保持運作，關閉手機畫面或重啟控制台不會重新搶位。新版 CLI 仍可從原終端啟動 `live`，與前端共用獨占鎖、程序狀態及各時段交接。設定與個資從 Mac local config 讀取，前端只取得資料組代號與公開進度，不公開個資、原始診斷或 screenshots；前端目標另存，原 CLI 的設定不會被覆寫。
+
+iPhone 加入主畫面後，點「啟用通知」及「測試通知」。官方確認暫留會推播日期／時段並提醒到 Mac 接手；VAPID 金鑰及訂閱自動保存在本機，服務重啟後沿用。手機鎖屏實際送達請用測試按鈕確認。`npm run monitor:status` 檢查服務，`monitor:stop` 停止控制台（不停止既有 worker）；升級後須重啟控制台載入新後端。詳細設定、升級、演示與程序狀態待確認時的處理見 [MONITOR.md](docs/MONITOR.md)。
 
 ## Repository architecture
 
 ```text
 src/
-  cli.ts          mode 流程、warm-up、並行與人工接手
+  cli.ts          CLI 模式與人工接手命令
+  reservation-runner.ts 共用 warm-up、各時段搶位及瀏覽器生命週期
+  reservation-worker.ts 私有 socket、程序獨占鎖與遠端控制
+  worker-client.ts 本機程序狀態與命令驗證
+  monitor-control.ts 前端目標設定、啟動與停止
+  monitor-push.ts  Web Push 訂閱、VAPID 與確認暫留通知
   cli-options.ts  CLI 參數及不可覆寫的 live 選項
   browser.ts      每個 slot 的獨立 Chrome／Chromium 程序
   config.ts       本機設定驗證、兩船代表人檢查

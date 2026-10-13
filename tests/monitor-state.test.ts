@@ -57,8 +57,8 @@ describe('safe monitor state projection', () => {
     emit(state, 'availability_request_started', { attempt: 1 }, '10:30', START + 400);
     emit(state, 'availability_detected', { attempt: 1, status: 'limited' }, '10:30', START + 410);
     expect(state.snapshot(START + 500).slots).toEqual([
-      { slot: '10:00', phase: 'retrying', attempts: 3, availability: 'unavailable', responseMs: 126, nextRetryAt: START + 1330, updatedAt: START + 330 },
-      { slot: '10:30', phase: 'monitoring', attempts: 1, availability: 'limited', responseMs: 10, nextRetryAt: null, updatedAt: START + 410 },
+      { slot: '10:00', phase: 'retrying', attempts: 3, availability: 'unavailable', responseMs: 126, nextRetryAt: START + 1330, updatedAt: START + 330, holdConfirmed: false, heldAt: null },
+      { slot: '10:30', phase: 'monitoring', attempts: 1, availability: 'limited', responseMs: 10, nextRetryAt: null, updatedAt: START + 410, holdConfirmed: false, heldAt: null },
     ]);
     emit(state, 'availability_request_started', { attempt: 4 }, '10:00', START + 1330);
     expect(state.snapshot(START + 1330).slots[0]).toMatchObject({ phase: 'monitoring', attempts: 4, nextRetryAt: null });
@@ -95,6 +95,18 @@ describe('safe monitor state projection', () => {
     emit(deadline, 'slot_outcome', { status: 'deadline-reached', attempts: 17 }, '10:00', START + 110);
     emit(deadline, 'automation_finished', {}, undefined, START + 120);
     expect(deadline.snapshot(START + 130).slots.map((slot) => slot.phase)).toEqual(['deadline', 'stopped']);
+  });
+
+  it('keeps confirmed hold evidence when later autofill needs manual work and rejects unknown/failed responses', () => {
+    const state = started();
+    emit(state, 'hold-response', { status: 200, result: '1' }, '10:00', START + 100);
+    emit(state, 'autofill_result', { customerFieldsVerified: false }, '10:00', START + 110);
+    emit(state, 'slot_outcome', { status: 'manual' }, '10:00', START + 120);
+    expect(state.snapshot(START + 130).slots[0]).toMatchObject({ phase: 'manual', holdConfirmed: true, heldAt: START + 100 });
+    emit(state, 'hold-response', { status: 500, result: '1' }, '10:30', START + 100);
+    emit(state, 'hold-response', { status: 200, result: 1 }, '10:30', START + 110);
+    emit(state, 'hold-response', { status: 200, result: '0' }, '10:30', START + 120);
+    expect(state.snapshot(START + 130).slots[1]).toMatchObject({ holdConfirmed: false, heldAt: null });
   });
 
   it('returns to monitoring only for the explicit rejected and sold-out path', () => {

@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createMonitorServer, type MonitorServerOptions } from '../src/monitor-server.js';
 import { MonitorState } from '../src/monitor-state.js';
+import { ControlFailure, createDemoControl } from '../src/monitor-control.js';
+import type { MonitorPush } from '../src/monitor-push.js';
 
 const password = 'Test-monitor-password-2026';
 const salt = 'abcd'.repeat(8);
@@ -247,6 +249,56 @@ describe('monitoring route boundaries', () => {
     }
     oversized = true;
     expect((await fetch(`${url}/api/events`, { headers: { Cookie: cookie } })).status).toBe(500);
+  });
+});
+
+describe('authenticated PWA control routes', () => {
+  it('requires login and same-origin POST for control, push subscriptions and test sends', async () => {
+    let sends = 0;
+    const push: MonitorPush = {
+      publicKey: 'public-vapid-key', status: () => ({ available: true, publicKey: 'public-vapid-key' }),
+      subscribe: async () => undefined, unsubscribe: async () => undefined,
+      test: async () => { sends += 1; }, observe: async () => undefined,
+    };
+    const control = createDemoControl();
+    const { url } = await start({ control, push });
+    for (const path of ['/api/control', '/api/push']) expect((await fetch(`${url}${path}`)).status).toBe(401);
+    for (const path of ['/api/control/start', '/api/control/stop', '/api/control/handoff', '/api/control/close', '/api/push/subscribe', '/api/push/test']) {
+      expect((await post(url, path, { confirmed: true })).status).toBe(401);
+    }
+    const cookie = await signIn(url);
+    const state = await fetch(`${url}/api/control`, { headers: { Cookie: cookie } });
+    expect(await state.json()).toMatchObject({ demo: true, worker: null });
+    expect((await post(url, '/api/control/start', { confirmed: true }, { Cookie: cookie, Origin: 'https://evil.test' })).status).toBe(403);
+    expect((await post(url, '/api/push/test', { endpoint: 'test' }, { Cookie: cookie, Origin: 'https://evil.test' })).status).toBe(403);
+    expect(sends).toBe(0);
+    expect((await post(url, '/api/control/start', { confirmed: true, command: 'rm' }, { Cookie: cookie })).status).toBe(400);
+    expect((await post(url, '/api/control/start', { confirmed: true }, { Cookie: cookie })).status).toBe(400);
+    const started = await post(url, '/api/control/start', { confirmed: true, settings: (await control.snapshot()).settings }, { Cookie: cookie });
+    const body = await started.json() as { worker: { runId: string } };
+    expect(started.status).toBe(200);
+    expect((await post(url, '/api/control/stop', { runId: 'old-run' }, { Cookie: cookie })).status).toBe(409);
+    expect((await post(url, '/api/control/stop', { runId: body.worker.runId }, { Cookie: cookie })).status).toBe(200);
+    expect((await post(url, '/api/control/handoff', { runId: body.worker.runId, slot: '11:00' }, { Cookie: cookie })).status).toBe(200);
+    expect((await post(url, '/api/control/close', { runId: body.worker.runId }, { Cookie: cookie })).status).toBe(200);
+    expect((await post(url, '/api/push/test', { endpoint: 'test' }, { Cookie: cookie })).status).toBe(200);
+    expect(sends).toBe(1);
+  });
+
+  it('returns only controlled safe errors and hides unexpected exception details', async () => {
+    const control = createDemoControl();
+    control.start = async () => { throw new ControlFailure('本機設定尚未就緒。', 400); };
+    const { url } = await start({ control });
+    const cookie = await signIn(url);
+    const payload = { confirmed: true, settings: (await control.snapshot()).settings };
+    let response = await post(url, '/api/control/start', payload, { Cookie: cookie });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: '本機設定尚未就緒。' });
+    control.start = async () => { throw new Error('PRIVATE-CUSTOMER-EMAIL'); };
+    response = await post(url, '/api/control/start', payload, { Cookie: cookie });
+    expect(response.status).toBe(500);
+    expect(await response.text()).not.toContain('PRIVATE');
+    expect(await (await fetch(`${url}/api/push`, { headers: { Cookie: cookie } })).json()).toEqual({ available: false, publicKey: '' });
   });
 });
 

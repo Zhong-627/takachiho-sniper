@@ -2,12 +2,13 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ArtifactsMonitor } from './monitor-source.js';
 import { createMonitorServer } from './monitor-server.js';
-import { demoMonitorSnapshot } from './monitor-demo.js';
 import { enableMonitorFunnel } from './monitor-funnel.js';
 import { monitorServiceStatus, startMonitorService, stopMonitorService, type MonitorServiceStatus } from './monitor-service.js';
 import { DEFAULT_AUTH_FILE, DEFAULT_FUNNEL_PORT, DEFAULT_MONITOR_PORT, readMonitorCredential, setupMonitorCredential } from './monitor-settings.js';
+import { createDemoControl, createMonitorControl } from './monitor-control.js';
+import { createMonitorPush, type MonitorPush } from './monitor-push.js';
 
-const help = `高千穗搶位進度 PWA（只讀）
+const help = `高千穗搶位控制台 PWA
 npm run monitor:setup                 建立本機登入密碼，不會輸出密碼
 npm run monitor                       啟動監控服務（本機 4174，HTTPS Funnel 登入）
 npm run monitor:start                 啟用 macOS 背景服務，登入後自動啟動
@@ -18,7 +19,8 @@ npm run monitor:demo -- --local-http   在本機查看演示資料（不會搶�
 選項：--port N、--https-port 443|8443|10000、--artifacts-dir PATH、--auth-file PATH
 setup 可加 --reset-password；serve 可加 --demo。
 --local-http 只允許本機 HTTP 登入，不能用來發布 Funnel。
-監控不讀取個資設定、不控制 Chrome、不建立預約。`;
+登入後可選日期／時段、開始搶位、停止、結束與交接；交接後在 Mac 填單付款。
+個資只從 Mac 的 config/config.local.json 載入，不傳到手機；演示模式不會搶位。`;
 
 export interface MonitorOptions {
   command: 'serve' | 'setup' | 'funnel' | 'service-start' | 'service-stop' | 'service-status'; port: number; httpsPort: number;
@@ -97,16 +99,29 @@ async function main(): Promise<void> {
     return;
   }
   const credential = await readMonitorCredential(options.authFile);
-  const started = Date.now();
   const source = new ArtifactsMonitor(resolve(options.artifactsDir));
   if (!options.demo) await source.refresh();
+  const demoControl = options.demo ? createDemoControl() : undefined;
+  const control = demoControl ?? createMonitorControl({
+    configPath: resolve('config/config.local.json'), directory: resolve('.local/control'),
+    artifactsDir: resolve(options.artifactsDir), snapshot: () => source.snapshot(),
+  });
+  let push: MonitorPush | undefined;
+  if (!options.demo) {
+    try {
+      push = await createMonitorPush({ directory: resolve('.local/push'),
+        ...(process.env.TAKACHIHO_PUSH_SUBJECT ? { subject: process.env.TAKACHIHO_PUSH_SUBJECT } : {}) });
+      await push.observe(source.snapshot());
+    } catch { console.error('手機推播暫時無法啟用，控制台仍可使用；請確認本機推播設定。'); }
+  }
   const server = createMonitorServer({ credential, secureCookies: !options.localHttp,
-    snapshot: () => options.demo ? demoMonitorSnapshot(started) : source.snapshot() });
+    snapshot: () => demoControl?.monitorSnapshot() ?? source.snapshot(), control, ...(push ? { push } : {}) });
   let refreshing = false;
   const refresh = setInterval(() => {
     if (refreshing || options.demo) return;
     refreshing = true;
-    void source.refresh().catch(() => undefined).finally(() => { refreshing = false; });
+    void source.refresh().then(() => { void push?.observe(source.snapshot()).catch(() => undefined); }).catch(() => undefined)
+      .finally(() => { refreshing = false; });
   }, 1000);
   refresh.unref();
   const stop = (): void => {

@@ -9,6 +9,9 @@ export interface MonitorSlot {
   responseMs: number | null;
   nextRetryAt: number | null;
   updatedAt: number | null;
+  /** Successful hold survives later autofill/manual phase changes. */
+  holdConfirmed?: boolean;
+  heldAt?: number | null;
 }
 
 export interface MonitorSnapshot {
@@ -119,6 +122,7 @@ export class MonitorState {
       };
       for (const slot of data.slots) this.slots.set(slot, {
         slot, phase: 'waiting', attempts: 0, availability: null, responseMs: null, nextRetryAt: null, updatedAt: at,
+        holdConfirmed: false, heldAt: null,
       });
       this.note(at, '搶位監控已開始');
       return;
@@ -205,10 +209,16 @@ export class MonitorState {
         update('reserving', '正在嘗試暫留船位', { preserveTerminal: true });
         break;
       case 'hold-response':
-        if (data.result === '1' && typeof data.status === 'number' && Number.isInteger(data.status) && data.status >= 200 && data.status < 300) update('held', '已暫留，待人工確認付款');
+        if (data.result === '1' && typeof data.status === 'number' && Number.isInteger(data.status) && data.status >= 200 && data.status < 300) {
+          slot.holdConfirmed = true;
+          slot.heldAt ??= at;
+          update('held', '已暫留，待人工確認付款');
+        }
         break;
       case 'customer-form-ready':
       case 'customer_form_ready':
+        slot.holdConfirmed = true;
+        slot.heldAt ??= at;
         update('held', '已暫留，待人工確認付款');
         break;
       case 'hold-rejected-sold-out':

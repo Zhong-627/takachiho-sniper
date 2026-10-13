@@ -28,11 +28,13 @@
   },
   "dependencies": {
     "playwright": "1.56.1",
+    "web-push": "3.6.7",
     "zod": "4.1.12"
   },
   "devDependencies": {
     "@eslint/js": "9.39.1",
     "@types/node": "24.10.0",
+    "@types/web-push": "3.6.4",
     "eslint": "9.39.1",
     "typescript": "5.9.3",
     "typescript-eslint": "8.46.3",

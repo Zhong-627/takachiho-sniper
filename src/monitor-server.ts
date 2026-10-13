@@ -4,6 +4,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { MonitorSnapshot } from './monitor-state.js';
+import { ControlFailure, type MonitorControl } from './monitor-control.js';
+import { MonitorPushError, type MonitorPush } from './monitor-push.js';
 
 export interface MonitorCredential {
   salt: string;
@@ -18,6 +20,8 @@ export interface MonitorServerOptions {
   /** Explicit public HTTPS origin, when a trusted reverse proxy rewrites Host. */
   expectedOrigin?: string;
   now?: () => number;
+  control?: MonitorControl;
+  push?: MonitorPush;
 }
 
 const SESSION_COOKIE = 'takachiho_monitor_session';
@@ -149,7 +153,7 @@ function passwordMatches(password: string, credential: MonitorCredential): Promi
   });
 }
 
-/** Read-only status service; the caller must listen on a loopback address. */
+/** Authenticated status/control service; the caller listens only on loopback. */
 export function createMonitorServer(options: MonitorServerOptions): Server {
   if (!/^[a-f0-9]{32,128}$/iu.test(options.credential.salt)
     || !/^[a-f0-9]{128}$/iu.test(options.credential.passwordHash)) {
@@ -252,6 +256,14 @@ export function createMonitorServer(options: MonitorServerOptions): Server {
     const apiMethods: Readonly<Record<string, string>> = {
       '/api/session': 'GET', '/api/status': 'GET', '/api/events': 'GET',
       '/api/login': 'POST', '/api/logout': 'POST',
+      ...(options.control ? {
+        '/api/control': 'GET', '/api/control/settings': 'POST', '/api/control/start': 'POST',
+        '/api/control/stop': 'POST', '/api/control/handoff': 'POST', '/api/control/close': 'POST',
+      } : {}),
+      '/api/push': 'GET',
+      ...(options.push ? {
+        '/api/push/subscribe': 'POST', '/api/push/unsubscribe': 'POST', '/api/push/test': 'POST',
+      } : {}),
     };
     const requiredMethod = apiMethods[path];
     const asset = Object.hasOwn(ASSETS, path) ? ASSETS[path] : undefined;
@@ -304,6 +316,39 @@ export function createMonitorServer(options: MonitorServerOptions): Server {
       response.setHeader('Set-Cookie', sessionCookie('', true));
       reply(response, 200, { authenticated: false }); return;
     }
+    if (path.startsWith('/api/control') || path.startsWith('/api/push')) {
+      if (!validSession(token)) { reply(response, 401, { error: 'Sign in required' }); return; }
+      if (path === '/api/control' && options.control) {
+        reply(response, 200, { ...await options.control.snapshot() }); return;
+      }
+      if (path === '/api/push') {
+        reply(response, 200, options.push?.status() ?? { available: false, publicKey: '' }); return;
+      }
+      const body = await jsonBody(request);
+      if (path === '/api/control/settings' && options.control) {
+        reply(response, 200, { ...await options.control.save(body) }); return;
+      }
+      if (path === '/api/control/start' && options.control) {
+        if (body.settings === undefined || Object.keys(body).some((key) => !['confirmed', 'settings'].includes(key))) throw new RequestFailure(400);
+        reply(response, 200, { ...await options.control.start(body.confirmed, body.settings) }); return;
+      }
+      if (options.control && ['/api/control/stop', '/api/control/handoff', '/api/control/close'].includes(path)) {
+        const command = path.slice('/api/control/'.length) as 'stop' | 'handoff' | 'close';
+        if (Object.keys(body).some((key) => !['runId', ...(command === 'handoff' ? ['slot'] : [])].includes(key))) throw new RequestFailure(400);
+        reply(response, 200, { ...await options.control.command(command, body.runId, body.slot) }); return;
+      }
+      if (options.push) {
+        if (path === '/api/push/subscribe') {
+          if (Object.keys(body).some((key) => key !== 'subscription')) throw new RequestFailure(400);
+          await options.push.subscribe(body.subscription);
+        } else {
+          if (Object.keys(body).some((key) => key !== 'endpoint')) throw new RequestFailure(400);
+          if (path === '/api/push/unsubscribe') await options.push.unsubscribe(body.endpoint);
+          else if (path === '/api/push/test') await options.push.test(body.endpoint);
+        }
+        reply(response, 200, { ok: true }); return;
+      }
+    }
     if (path === '/api/status' || path === '/api/events') {
       if (!validSession(token)) { reply(response, 401, { error: 'Sign in required' }); return; }
       if (path === '/api/status') {
@@ -336,7 +381,9 @@ export function createMonitorServer(options: MonitorServerOptions): Server {
     void route(request, response).catch((error: unknown) => {
       if (response.headersSent) { response.destroy(); return; }
       response.setHeader('Connection', 'close');
-      reply(response, error instanceof RequestFailure ? error.status : 500, { error: 'Request rejected' });
+      const expected = error instanceof ControlFailure || error instanceof MonitorPushError;
+      reply(response, error instanceof RequestFailure || expected ? error.status : 500,
+        { error: expected ? error.message : 'Request rejected' });
     });
   });
   server.requestTimeout = 15_000;

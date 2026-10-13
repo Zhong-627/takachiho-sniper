@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "高千穗搶位進度",
-  "short_name": "高千穗進度",
-  "description": "手機即時查看 Mac 的高千穗搶位進度。",
+  "name": "高千穗搶位控制台",
+  "short_name": "高千穗搶位",
+  "description": "從手機設定、啟動與查看 Mac 搶位進度；在 Mac 完成預約。",
   "lang": "zh-Hant",
   "start_url": "/",
   "scope": "/",

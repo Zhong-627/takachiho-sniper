@@ -4,6 +4,13 @@ const elements = Object.fromEntries([
   'connection-copy', 'last-received', 'target-date', 'run-mode', 'monitor-from',
   'release-at', 'monitor-until', 'slots', 'slot-template', 'empty-state',
   'events', 'event-count', 'no-events', 'demo-badge',
+  'control-panel', 'control-state', 'control-demo', 'control-note', 'control-form',
+  'control-fields', 'control-save', 'control-start', 'control-stop', 'control-close',
+  'control-feedback', 'settings-status', 'setting-date', 'setting-monitor-from',
+  'setting-release-at', 'setting-monitor-until', 'setting-delay', 'setting-manual',
+  'setting-schedule-reset',
+  'slot-1-enabled', 'slot-1-time', 'slot-1-profile', 'slot-2-enabled', 'slot-2-time',
+  'slot-2-profile', 'push-enable', 'push-test', 'push-disable', 'push-copy', 'push-feedback',
 ].map((id) => [id, document.getElementById(id)]));
 
 const phaseDetails = {
@@ -44,6 +51,18 @@ let connecting = false;
 let pendingLogout = false;
 let slotViews = [];
 let authGeneration = 0;
+let control = null;
+let controlReceivedAt = 0;
+let controlRequest = null;
+let controlEpoch = 0;
+let settingsDirty = false;
+let settingsTargetDate = '';
+let commandBusy = false;
+let pushConfig = null;
+let pushSubscription = null;
+let pushBusy = false;
+let pushNeedsRenew = false;
+let pushSyncError = false;
 
 function validTime(value) {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 8640000000000000;
@@ -103,6 +122,22 @@ function showLogin(message = '', focus = false) {
   elements['login-view'].hidden = false;
   elements.logout.hidden = true;
   elements.password.value = '';
+  controlEpoch += 1;
+  control = null;
+  controlReceivedAt = 0;
+  controlRequest = null;
+  settingsDirty = false;
+  commandBusy = false;
+  pushConfig = null;
+  pushSubscription = null;
+  pushBusy = false;
+  pushNeedsRenew = false;
+  pushSyncError = false;
+  elements['control-form'].reset();
+  elements['control-feedback'].textContent = '';
+  elements['push-feedback'].textContent = '';
+  renderControl();
+  renderPush();
   setLoginFeedback(message);
   if (focus) elements.password.focus();
 }
@@ -114,6 +149,8 @@ function showStatus() {
   elements.logout.hidden = false;
   elements.password.value = '';
   updateConnection();
+  void refreshControl();
+  void refreshPush();
 }
 
 async function api(path, options = {}) {
@@ -173,6 +210,7 @@ function updateConnection() {
   elements['connection-copy'].textContent = copy;
   elements['last-received'].textContent = snapshot ? `資料${elapsedLabel(snapshot.updatedAt || snapshot.heartbeatAt)}` : '';
   updateTimers();
+  renderControl();
 }
 
 function renderSnapshot() {
@@ -203,15 +241,21 @@ function renderSnapshot() {
     card.querySelector('.availability').textContent = Object.hasOwn(availabilityLabels, slot.availability) ? availabilityLabels[slot.availability] : '尚未查詢';
     card.querySelector('.response').textContent = typeof slot.responseMs === 'number' && Number.isFinite(slot.responseMs) && slot.responseMs >= 0 ? `${numberFormatter.format(Math.round(slot.responseMs))} ms` : '—';
     cards.append(card);
+    const handoff = card.querySelector('.slot-handoff');
+    const handoffButton = card.querySelector('.handoff-button');
+    handoffButton.setAttribute('aria-label', `${slot.slot} 交接到 Mac`);
+    handoffButton.addEventListener('click', () => void runControlCommand('handoff', slot.slot));
     return {
       slot, retry: card.querySelector('.retry'), updated: card.querySelector('.slot-updated'),
       badge: card.querySelector('.phase-badge'), description: card.querySelector('.phase-description'),
+      handoff, handoffButton,
     };
   });
   elements.slots.replaceChildren(cards);
   elements['empty-state'].hidden = snapshot.slots.length > 0;
   renderEvents();
   updateTimers();
+  renderControlActions();
 }
 
 function renderEvents() {
@@ -268,6 +312,396 @@ function updateTimers() {
     } else {
       retry.textContent = slot.phase === 'reserving' ? '正在確認暫留結果' : '即時更新中';
     }
+  }
+}
+
+class UserMessage extends Error {}
+
+function controlFresh() {
+  return authenticated && navigator.onLine && control && Date.now() - controlReceivedAt < 12000;
+}
+
+function controlLocked() {
+  return Boolean(control?.externalRun || (control?.worker && !control.worker.closed));
+}
+
+function settingsReady(settings) {
+  return settings && typeof settings.targetDate === 'string' && Array.isArray(settings.slots)
+    && settings.slots.length > 0 && settings.slots.length <= 2
+    && ['monitorFrom', 'releaseAt', 'monitorUntil'].every((key) => typeof settings[key] === 'string' && Number.isFinite(Date.parse(settings[key])));
+}
+
+function taipeiInput(value) {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? new Date(parsed + 8 * 3600000).toISOString().slice(0, 19) : '';
+}
+
+function defaultSchedule(targetDate) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(targetDate)) return null;
+  // Treat the Japan boarding date as a calendar date, independent of the device timezone.
+  const boardingDate = new Date(`${targetDate}T00:00:00Z`);
+  if (!Number.isFinite(boardingDate.getTime()) || boardingDate.toISOString().slice(0, 10) !== targetDate) return null;
+  boardingDate.setUTCDate(boardingDate.getUTCDate() - 14);
+  const releaseDate = boardingDate.toISOString().slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(releaseDate)) return null;
+  // The configurable frontend default is 07:55 Taipei, with a seven-minute lead.
+  const releaseAt = Date.parse(`${releaseDate}T07:55:00+08:00`);
+  return {
+    monitorFrom: taipeiInput(new Date(releaseAt - 7 * 60000).toISOString()),
+    releaseAt: taipeiInput(new Date(releaseAt).toISOString()),
+    monitorUntil: taipeiInput(new Date(releaseAt + 130 * 60000).toISOString()),
+  };
+}
+
+function resetSchedule() {
+  if (elements['control-fields'].disabled) return false;
+  const schedule = defaultSchedule(elements['setting-date'].value);
+  if (!schedule) return false;
+  elements['setting-monitor-from'].value = schedule.monitorFrom;
+  elements['setting-release-at'].value = schedule.releaseAt;
+  elements['setting-monitor-until'].value = schedule.monitorUntil;
+  settingsDirty = true;
+  controlFeedback('已依乘船日期重新帶入預設時間，可再手動調整。');
+  return true;
+}
+
+function updateScheduleForDate() {
+  const targetDate = elements['setting-date'].value;
+  if (targetDate === settingsTargetDate) return false;
+  settingsTargetDate = targetDate;
+  return resetSchedule();
+}
+
+function fillSettings() {
+  if (!settingsReady(control?.settings)) return;
+  const settings = control.settings;
+  elements['setting-date'].value = settings.targetDate;
+  settingsTargetDate = elements['setting-date'].value;
+  elements['setting-monitor-from'].value = taipeiInput(settings.monitorFrom);
+  elements['setting-release-at'].value = taipeiInput(settings.releaseAt);
+  elements['setting-monitor-until'].value = taipeiInput(settings.monitorUntil);
+  elements['setting-delay'].value = settings.baseDelayMs;
+  elements['setting-manual'].checked = settings.manualCustomerForm;
+  for (const index of [1, 2]) {
+    const selected = settings.slots[index - 1];
+    elements[`slot-${index}-enabled`].checked = Boolean(selected);
+    elements[`slot-${index}-time`].value = selected?.slot || '';
+    const select = elements[`slot-${index}-profile`];
+    select.replaceChildren();
+    for (const profile of control.profiles || []) {
+      if (typeof profile.id !== 'string' || typeof profile.label !== 'string') continue;
+      const option = document.createElement('option');
+      option.value = profile.id;
+      option.textContent = profile.label;
+      select.append(option);
+    }
+    if (selected) select.value = selected.customerProfile;
+    else if (select.options.length > 1) select.selectedIndex = 1;
+  }
+}
+
+function renderControlActions() {
+  const ready = controlFresh() && control.enabled;
+  const settingsAvailable = ready && settingsReady(control.settings);
+  const busy = commandBusy || control?.busy;
+  const locked = controlLocked();
+  elements['control-fields'].disabled = !settingsAvailable || busy || locked;
+  elements['control-save'].disabled = !settingsAvailable || busy || locked || !settingsDirty;
+  elements['control-start'].disabled = !settingsAvailable || busy || locked || settingsDirty;
+  elements['setting-schedule-reset'].disabled = !settingsAvailable || busy || locked || !defaultSchedule(elements['setting-date'].value);
+  elements['control-stop'].disabled = !ready || busy || !control.worker || control.worker.closed || control.worker.automationStopped || control.externalRun;
+  elements['control-close'].disabled = !ready || busy || !control.worker || control.worker.closed || control.externalRun;
+  for (const index of [1, 2]) {
+    const selected = elements[`slot-${index}-enabled`].checked;
+    elements[`slot-${index}-time`].disabled = !selected;
+    elements[`slot-${index}-time`].required = selected;
+    elements[`slot-${index}-profile`].disabled = !selected;
+    elements[`slot-${index}-profile`].required = selected;
+  }
+  for (const view of slotViews) {
+    const workerSlot = control?.worker?.slots.find((slot) => slot.slot === view.slot.slot);
+    view.handoff.hidden = !workerSlot || control.worker.closed || control.externalRun;
+    view.handoffButton.disabled = !ready || busy || !workerSlot?.canHandoff || workerSlot.handedOff;
+    view.handoffButton.textContent = workerSlot?.handedOff ? '已交接 · 請在 Mac 繼續' : '交接到 Mac';
+  }
+}
+
+function renderControl() {
+  elements['control-demo'].hidden = !control?.demo;
+  let state = '正在取得設定';
+  let note = '選好日期與時段，再啟動 Mac 的搶位程式。';
+  if (!navigator.onLine) {
+    state = '手機離線';
+    note = '恢復連線並取得最新狀態後，才能操作搶位程式。';
+  } else if (!controlFresh()) {
+    state = '控制狀態待更新';
+    note = '正在取得 Mac 最新控制狀態，按鈕暫時停用。';
+  } else if (!control.enabled) {
+    state = '控制尚未就緒';
+    note = control.error || '請在 Mac 確認搶位設定，控制功能才能使用。';
+  } else if (commandBusy || control.busy) {
+    state = '正在處理操作';
+  } else if (control.externalRun) {
+    state = 'Mac 終端機執行中';
+    note = '此程式由 Mac 終端機啟動。請在原終端機接手或結束，再從這裡啟動；日期與時段暫時鎖定。';
+  } else if (control.worker && !control.worker.closed) {
+    state = control.worker.automationStopped ? '已停止 · 頁面保留' : '搶位程式已啟動';
+    note = '本次日期與時段已鎖定。更換目標前，請先結束程式，再修改設定並重新啟動。';
+    if (!settingsReady(control.settings)) note += ' 本機設定目前無法讀取，仍可交接、停止或結束這次執行。';
+  } else if (!settingsReady(control.settings)) {
+    state = '控制尚未就緒';
+    note = control.error || '請在 Mac 確認搶位設定，控制功能才能使用。';
+  } else {
+    state = control.worker?.closed ? '程式已結束' : '準備啟動';
+  }
+  elements['control-state'].textContent = state;
+  elements['control-note'].textContent = note;
+  elements['settings-status'].textContent = settingsDirty ? '有未儲存的修改，請先儲存。' : settingsReady(control?.settings) ? '使用 Mac 已儲存的搶位設定' : '等待設定';
+  renderControlActions();
+}
+
+async function refreshControl() {
+  if (!authenticated || !navigator.onLine) { renderControl(); return false; }
+  if (controlRequest) return controlRequest;
+  const epoch = controlEpoch;
+  controlRequest = (async () => {
+    try {
+      const response = await api('/api/control');
+      if (!authenticated || epoch !== controlEpoch) return false;
+      if (response.status === 401) { showLogin('登入已到期，請重新輸入監控密碼。', true); return false; }
+      if (!response.ok) throw new Error('Control unavailable');
+      const value = await response.json();
+      if (!authenticated || epoch !== controlEpoch) return false;
+      if (!value || typeof value.enabled !== 'boolean' || !Array.isArray(value.profiles)) throw new Error('Invalid control state');
+      control = value;
+      controlReceivedAt = Date.now();
+      if (!settingsDirty) fillSettings();
+      renderControl();
+      return true;
+    } catch {
+      if (epoch !== controlEpoch) return false;
+      controlReceivedAt = 0;
+      renderControl();
+      return false;
+    } finally {
+      if (epoch === controlEpoch) controlRequest = null;
+    }
+  })();
+  return controlRequest;
+}
+
+function controlFeedback(message, ok = false) {
+  elements['control-feedback'].textContent = message;
+  elements['control-feedback'].classList.toggle('control-feedback-ok', ok);
+}
+
+function readSettings() {
+  const slots = [1, 2].filter((index) => elements[`slot-${index}-enabled`].checked).map((index) => ({
+    slot: elements[`slot-${index}-time`].value,
+    customerProfile: elements[`slot-${index}-profile`].value,
+  }));
+  if (!slots.length) throw new UserMessage('請至少勾選一個乘船時段。');
+  if (new Set(slots.map((slot) => slot.slot)).size !== slots.length) throw new UserMessage('兩個時段不能相同；只搶一個時段時，請只勾一列。');
+  return {
+    targetDate: elements['setting-date'].value,
+    monitorFrom: `${elements['setting-monitor-from'].value}+08:00`,
+    releaseAt: `${elements['setting-release-at'].value}+08:00`,
+    monitorUntil: `${elements['setting-monitor-until'].value}+08:00`,
+    baseDelayMs: Number(elements['setting-delay'].value),
+    manualCustomerForm: elements['setting-manual'].checked,
+    slots,
+  };
+}
+
+function sameSettings(left, right) {
+  return left && right && left.targetDate === right.targetDate && left.baseDelayMs === right.baseDelayMs
+    && left.manualCustomerForm === right.manualCustomerForm && JSON.stringify(left.slots) === JSON.stringify(right.slots)
+    && ['monitorFrom', 'releaseAt', 'monitorUntil'].every((key) => Date.parse(left[key]) === Date.parse(right[key]));
+}
+
+async function runControlCommand(command, slot) {
+  if (commandBusy || !controlFresh()) return;
+  const epoch = controlEpoch;
+  const expectedRunId = control.worker?.runId;
+  const expectedSettings = control.settings;
+  let settings;
+  if (command === 'settings') {
+    if (!elements['control-form'].reportValidity()) return;
+    try { settings = readSettings(); } catch (error) { controlFeedback(error.message); return; }
+  }
+  commandBusy = true;
+  controlFeedback('正在確認 Mac 最新狀態…');
+  renderControl();
+  try {
+    if (!await refreshControl() || !controlFresh()) throw new UserMessage('無法取得最新控制狀態，請恢復連線後再試。');
+    if (!authenticated || epoch !== controlEpoch) return;
+    if (!control.enabled || control.busy || control.externalRun) throw new UserMessage(control.error || 'Mac 目前無法接受這項操作，請確認最新狀態。');
+    if (['settings', 'start'].includes(command) && controlLocked()) throw new UserMessage('搶位程式已啟動；請先結束程式，再變更設定。');
+    if (command === 'start' && (settingsDirty || !sameSettings(expectedSettings, control.settings))) throw new UserMessage('搶位設定已變更，請確認畫面上的設定，再按開始搶位。');
+    if (['stop', 'close', 'handoff'].includes(command)) {
+      if (!expectedRunId || control.worker?.runId !== expectedRunId || control.worker.closed) throw new UserMessage('本次執行狀態已變更，請確認最新狀態後再操作。');
+      if (command === 'stop' && control.worker.automationStopped) throw new UserMessage('搶位已停止，頁面仍保留在 Mac。');
+      if (command === 'handoff' && !control.worker.slots.some((item) => item.slot === slot && item.canHandoff && !item.handedOff)) throw new UserMessage('這個時段目前無法交接，請確認 Mac 的最新狀態。');
+    }
+    const payload = command === 'settings' ? settings : command === 'start' ? { confirmed: true, settings: control.settings } : command === 'handoff' ? { runId: expectedRunId, slot } : { runId: expectedRunId };
+    const response = await api(`/api/control/${command}`, { method: 'POST', body: JSON.stringify(payload) });
+    if (!authenticated || epoch !== controlEpoch) return;
+    if (response.status === 401) { showLogin('登入已到期，請重新輸入監控密碼。', true); return; }
+    if (!response.ok) {
+      const failure = await response.json().catch(() => ({}));
+      throw new UserMessage(typeof failure.error === 'string' ? failure.error.slice(0, 400) : '操作未完成，請確認 Mac 狀態後再試。');
+    }
+    if (command === 'settings') settingsDirty = false;
+    if (!await refreshControl()) throw new UserMessage('操作已送出，但尚未取得確認狀態。請重新連線，確認 Mac 的結果。');
+    if (!authenticated || epoch !== controlEpoch) return;
+    const verified = command === 'settings' ? sameSettings(settings, control.settings)
+      : command === 'start' ? Boolean(control.worker && !control.worker.closed && control.worker.runId !== expectedRunId)
+        : command === 'close' ? !control.worker || (control.worker.runId === expectedRunId && control.worker.closed)
+          : command === 'stop' ? control.worker?.runId === expectedRunId && control.worker.automationStopped
+            : control.worker?.runId === expectedRunId && control.worker.slots.some((item) => item.slot === slot && item.handedOff);
+    if (!verified) throw new UserMessage('操作已送出，但 Mac 尚未確認完成。請查看最新狀態或到 Mac 確認。');
+    const messages = {
+      settings: '設定已儲存。確認後即可開始搶位。',
+      start: 'Mac 搶位程式已啟動，請查看下方各時段進度。',
+      stop: '已停止自動搶位，預約頁面保留在 Mac。',
+      close: '程式與預約瀏覽器已結束，控制台仍可使用。',
+      handoff: `${slot} 已交接。請在 Mac 原本的瀏覽器填單、確認及付款；另一時段會依原設定繼續。`,
+    };
+    if (epoch === controlEpoch) controlFeedback(`${control.demo ? '演示：' : ''}${messages[command]}`, true);
+  } catch (error) {
+    if (epoch === controlEpoch) controlFeedback(error instanceof UserMessage ? error.message : '無法連到 Mac，操作結果尚未確認。請重新連線後查看。');
+    await refreshControl();
+  } finally {
+    if (epoch === controlEpoch) { commandBusy = false; renderControl(); }
+  }
+}
+
+function pushSupported() {
+  const iphone = /iPhone|iPod/.test(navigator.userAgent);
+  const standalone = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  return window.isSecureContext && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window && (!iphone || standalone);
+}
+
+function renderPush() {
+  const supported = pushSupported();
+  elements['push-enable'].hidden = Boolean(pushSubscription);
+  elements['push-enable'].disabled = !authenticated || pushBusy || !navigator.onLine || !supported || !pushConfig?.available || window.Notification.permission === 'denied';
+  elements['push-test'].hidden = !pushSubscription;
+  elements['push-disable'].hidden = !pushSubscription;
+  elements['push-test'].disabled = pushBusy || !navigator.onLine || !pushConfig?.available;
+  elements['push-disable'].disabled = pushBusy || !navigator.onLine;
+  let copy = '官方確認暫留後提醒你回到 Mac 接手確認、填單及付款。';
+  if (!supported) copy = 'iPhone 需使用 iOS 16.4 以上：在 Safari「分享 → 加入主畫面」，再從主畫面開啟此 PWA 並啟用通知。';
+  else if (window.Notification.permission === 'denied') copy = '通知權限已關閉。請到裝置設定允許此 PWA 通知，再重新開啟。';
+  else if (pushSubscription) copy = '這台裝置已啟用通知。官方確認暫留後，會提醒你回到 Mac 確認、填單及付款。';
+  else if (pushConfig && !pushConfig.available) copy = 'Mac 的推播服務尚未就緒，請在 Mac 完成通知設定後再啟用。';
+  if (pushNeedsRenew) copy = 'Mac 通知金鑰已更新，請按「啟用通知」重新登記這台裝置。';
+  else if (pushSyncError) copy = '這台裝置尚未成功登記到 Mac，請按「啟用通知」重試。';
+  if (control?.demo) copy += ' 演示模式不發送真實推播。';
+  elements['push-copy'].textContent = copy;
+}
+
+async function refreshPush() {
+  if (!authenticated || !navigator.onLine) { renderPush(); return; }
+  const epoch = controlEpoch;
+  try {
+    const response = await api('/api/push');
+    if (response.status === 401 || !response.ok) return;
+    const value = await response.json();
+    if (!authenticated || epoch !== controlEpoch) return;
+    pushConfig = value;
+    if (pushSupported()) {
+      const registration = await navigator.serviceWorker.ready;
+      const subscription = await registration.pushManager.getSubscription();
+      if (!authenticated || epoch !== controlEpoch) return;
+      pushNeedsRenew = Boolean(subscription && pushConfig.available && !matchingPushKey(subscription, pushConfig.publicKey));
+      pushSubscription = null;
+      pushSyncError = false;
+      if (subscription && pushConfig.available && !pushNeedsRenew && window.Notification.permission === 'granted') {
+        // An existing browser subscription alone does not prove the Mac has it.
+        const registered = await api('/api/push/subscribe', { method: 'POST', body: JSON.stringify({ subscription: subscription.toJSON() }) });
+        if (!authenticated || epoch !== controlEpoch) return;
+        if (registered.ok) pushSubscription = subscription;
+        else pushSyncError = true;
+      }
+    }
+  } catch {
+    if (epoch === controlEpoch) { pushSubscription = null; pushSyncError = true; }
+  } finally {
+    if (epoch === controlEpoch) renderPush();
+  }
+}
+
+function decodePushKey(value) {
+  const encoded = value.replace(/-/g, '+').replace(/_/g, '/');
+  const decoded = window.atob(encoded + '='.repeat((4 - encoded.length % 4) % 4));
+  return Uint8Array.from(decoded, (character) => character.charCodeAt(0));
+}
+
+function matchingPushKey(subscription, publicKey) {
+  if (typeof publicKey !== 'string' || !subscription.options?.applicationServerKey) return false;
+  try {
+    const existing = new Uint8Array(subscription.options.applicationServerKey);
+    const expected = decodePushKey(publicKey);
+    return existing.length === expected.length && existing.every((value, index) => value === expected[index]);
+  } catch { return false; }
+}
+
+async function runPushCommand(command) {
+  if (pushBusy || !authenticated || !navigator.onLine || !pushSupported()) return;
+  const epoch = controlEpoch;
+  // Permission is requested directly from the user's button gesture.
+  const permission = command === 'subscribe' && window.Notification.permission === 'default' ? window.Notification.requestPermission() : Promise.resolve(window.Notification.permission);
+  pushBusy = true;
+  elements['push-feedback'].textContent = '正在處理通知設定…';
+  renderPush();
+  let createdSubscription = null;
+  try {
+    if (command === 'subscribe' && await permission !== 'granted') throw new UserMessage('尚未允許通知。你可以稍後再按「啟用通知」。');
+    const registration = await navigator.serviceWorker.ready;
+    if (!authenticated || epoch !== controlEpoch) return;
+    let subscription = await registration.pushManager.getSubscription();
+    if (command === 'subscribe') {
+      await refreshPush();
+      if (!authenticated || epoch !== controlEpoch) return;
+      if (!pushConfig?.available || typeof pushConfig.publicKey !== 'string') throw new UserMessage('Mac 推播服務尚未就緒，請稍後再試。');
+      if (subscription && !matchingPushKey(subscription, pushConfig.publicKey)) {
+        await subscription.unsubscribe();
+        subscription = null;
+      }
+      if (!subscription) {
+        subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: decodePushKey(pushConfig.publicKey) });
+        createdSubscription = subscription;
+      }
+    }
+    if (!authenticated || epoch !== controlEpoch) return;
+    if (!subscription) throw new UserMessage('這台裝置尚未啟用通知，請先按「啟用通知」。');
+    const payload = command === 'subscribe' ? { subscription: subscription.toJSON() } : { endpoint: subscription.endpoint };
+    const response = await api(`/api/push/${command}`, { method: 'POST', body: JSON.stringify(payload) });
+    if (!authenticated || epoch !== controlEpoch) return;
+    if (response.status === 401) { showLogin('登入已到期，請重新輸入監控密碼。', true); return; }
+    if (!response.ok) {
+      const failure = await response.json().catch(() => ({}));
+      if (command === 'test' && response.status === 410) {
+        await subscription.unsubscribe().catch(() => {});
+        pushSubscription = null;
+        pushNeedsRenew = false;
+        pushSyncError = true;
+      }
+      throw new UserMessage(typeof failure.error === 'string' ? failure.error.slice(0, 400) : '通知操作未完成，請稍後再試。');
+    }
+    createdSubscription = null;
+    pushNeedsRenew = false;
+    pushSyncError = false;
+    if (command === 'unsubscribe') { await subscription.unsubscribe(); pushSubscription = null; }
+    else pushSubscription = subscription;
+    elements['push-feedback'].textContent = command === 'subscribe' ? '已啟用這台裝置的通知。可按「測試通知」確認。' : command === 'unsubscribe' ? '已停用這台裝置的通知。' : '測試通知已送出，請確認手機是否收到。';
+  } catch (error) {
+    if (createdSubscription) await createdSubscription.unsubscribe().catch(() => {});
+    if (epoch === controlEpoch) elements['push-feedback'].textContent = error instanceof UserMessage ? error.message : '無法更新通知設定，請稍後再試。';
+  } finally {
+    if (createdSubscription && epoch !== controlEpoch) await createdSubscription.unsubscribe().catch(() => {});
+    if (epoch === controlEpoch) { pushBusy = false; renderPush(); }
   }
 }
 
@@ -411,23 +845,52 @@ elements.logout.addEventListener('click', async () => {
 elements.refresh.addEventListener('click', () => {
   reconnectDelay = 1500;
   void connect();
+  void refreshControl();
+  void refreshPush();
 });
+
+elements['control-form'].addEventListener('input', (event) => {
+  settingsDirty = true;
+  if (event.target !== elements['setting-date'] || !updateScheduleForDate()) controlFeedback('');
+  renderControl();
+});
+elements['control-form'].addEventListener('change', (event) => {
+  settingsDirty = true;
+  if (event.target === elements['setting-date']) updateScheduleForDate();
+  renderControl();
+});
+elements['setting-schedule-reset'].addEventListener('click', () => {
+  if (resetSchedule()) renderControl();
+});
+elements['control-form'].addEventListener('submit', (event) => {
+  event.preventDefault();
+  void runControlCommand('settings');
+});
+elements['control-start'].addEventListener('click', () => void runControlCommand('start'));
+elements['control-stop'].addEventListener('click', () => void runControlCommand('stop'));
+elements['control-close'].addEventListener('click', () => void runControlCommand('close'));
+elements['push-enable'].addEventListener('click', () => void runPushCommand('subscribe'));
+elements['push-test'].addEventListener('click', () => void runPushCommand('test'));
+elements['push-disable'].addEventListener('click', () => void runPushCommand('unsubscribe'));
 
 window.addEventListener('offline', () => {
   stopConnection();
   if (authenticated) updateConnection();
   else setLoginFeedback('手機目前離線，請恢復連線後再登入。');
+  renderControl();
+  renderPush();
 });
 window.addEventListener('online', () => {
-  if (authenticated) void connect();
+  if (authenticated) { void connect(); void refreshControl(); void refreshPush(); }
   else void checkSession();
 });
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
-  if (authenticated) void connect();
+  if (authenticated) { void connect(); void refreshControl(); void refreshPush(); }
   else void checkSession();
 });
 window.setInterval(updateConnection, 1000);
+window.setInterval(() => { if (authenticated && document.visibilityState === 'visible') void refreshControl(); }, 3000);
 
 if ('serviceWorker' in navigator && window.isSecureContext) {
   navigator.serviceWorker.register('/sw.js').catch(() => {
