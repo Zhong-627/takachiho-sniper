@@ -128,18 +128,18 @@
                   <div class="setting-slots">
                     <div class="slot-choice">
                       <label class="slot-check"><input id="slot-1-enabled" type="checkbox" checked><span>時段 1</span></label>
-                      <div><label for="slot-1-time">乘船時間 · 日本時間</label><label class="temporal-field" for="slot-1-time"><input id="slot-1-time" type="time" required step="60"></label></div>
+                      <div><label for="slot-1-time">乘船時間 · 日本時間</label><select id="slot-1-time" required aria-describedby="boarding-time-hint"></select></div>
                       <div><label for="slot-1-profile">乘客設定</label><select id="slot-1-profile" required></select></div>
                     </div>
                     <div class="slot-choice">
                       <label class="slot-check"><input id="slot-2-enabled" type="checkbox"><span>時段 2</span></label>
                       <div id="slot-2-options" class="slot-options" hidden>
-                        <div><label for="slot-2-time">乘船時間 · 日本時間</label><label class="temporal-field" for="slot-2-time"><input id="slot-2-time" type="time" step="60"></label></div>
+                        <div><label for="slot-2-time">乘船時間 · 日本時間</label><select id="slot-2-time" aria-describedby="boarding-time-hint"></select></div>
                         <div><label for="slot-2-profile">乘客設定</label><select id="slot-2-profile"></select></div>
                       </div>
                     </div>
                   </div>
-                  <p class="field-hint">請填官方實際提供的時段。只勾一列就只搶該時段；勾兩列會各自搶位，兩個都保留。</p>
+                  <p id="boarding-time-hint" class="field-hint">乘船時間可選 08:00～16:00，每半小時一個時段。只勾一列就只搶該時段；勾兩列會各自搶位，兩個都保留。</p>
                   <details id="schedule-settings" class="schedule-settings">
                     <summary><span>排程 · 台灣時間</span><span id="schedule-summary" class="schedule-summary">等待排程</span></summary>
                     <div class="schedule-fields">

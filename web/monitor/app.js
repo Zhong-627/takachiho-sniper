@@ -70,6 +70,44 @@ let pushSyncError = false;
 let activePanel = 'progress';
 let pendingCloseRunId = null;
 
+const boardingSlots = Array.from({ length: 17 }, (_, index) => {
+  const minutes = 8 * 60 + index * 30;
+  return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+});
+for (const index of [1, 2]) {
+  const select = elements[`slot-${index}-time`];
+  for (const value of ['', ...boardingSlots]) {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = value || '請選擇乘船時間';
+    select.append(option);
+  }
+}
+
+function updateBoardingConstraints() {
+  const japanNow = new Date(Date.now() + clockOffset + 9 * 3600000);
+  const min = japanNow.toISOString().slice(0, 10);
+  const lastOpenDate = new Date(`${min}T00:00:00Z`);
+  lastOpenDate.setUTCDate(lastOpenDate.getUTCDate() + (japanNow.getUTCHours() >= 9 ? 14 : 13));
+  const range = control?.targetDateRange || { min, max: lastOpenDate.toISOString().slice(0, 10) };
+  const date = elements['setting-date'];
+  date.min = range.min;
+  date.max = range.max;
+  const validDate = Boolean(date.value && date.value >= date.min && date.value <= date.max);
+  date.setCustomValidity(validDate ? '' : `請選擇 ${date.min}～${date.max} 的乘船日期。`);
+  let enabledSlots = 0;
+  let validSlots = true;
+  for (const index of [1, 2]) {
+    const enabled = elements[`slot-${index}-enabled`].checked;
+    const time = elements[`slot-${index}-time`];
+    const valid = boardingSlots.includes(time.value);
+    time.setCustomValidity(enabled && !valid ? '請選擇 08:00～16:00、每半小時的乘船時間。' : '');
+    if (enabled) enabledSlots += 1;
+    if (enabled && !valid) validSlots = false;
+  }
+  return validDate && enabledSlots > 0 && validSlots;
+}
+
 function selectDashboardPanel(panel, scroll = true, focus = false) {
   if (!['progress', 'settings'].includes(panel)) return;
   activePanel = panel;
@@ -461,13 +499,14 @@ function fillSettings() {
 }
 
 function renderControlActions() {
+  const validTargets = updateBoardingConstraints();
   const ready = controlFresh() && control.enabled;
   const settingsAvailable = ready && settingsReady(control.settings);
   const busy = commandBusy || control?.busy;
   const locked = controlLocked();
   elements['control-fields'].disabled = !settingsAvailable || busy || locked;
   elements['control-save'].disabled = !settingsAvailable || busy || locked || !settingsDirty;
-  elements['control-start'].disabled = !settingsAvailable || busy || locked || settingsDirty;
+  elements['control-start'].disabled = !settingsAvailable || busy || locked || settingsDirty || !validTargets;
   elements['setting-schedule-reset'].disabled = !settingsAvailable || busy || locked || !defaultSchedule(elements['setting-date'].value);
   elements['control-stop'].disabled = !ready || busy || !control.worker || control.worker.closed || control.worker.automationStopped || control.externalRun;
   elements['control-close'].disabled = !ready || busy || !control.worker || control.worker.closed || control.externalRun;
@@ -518,6 +557,7 @@ function renderControl() {
     note = control.error || '請在 Mac 確認搶位設定，控制功能才能使用。';
   } else {
     state = control.worker?.closed ? '程式已結束' : '準備啟動';
+    if (!updateBoardingConstraints()) note = '已儲存的乘船日期或時間不在可選範圍，請重新選擇並儲存設定。';
   }
   elements['control-state'].textContent = state;
   elements['control-note'].textContent = note;
@@ -599,6 +639,7 @@ async function runControlCommand(command, slot, confirmedRunId) {
   const expectedRunId = command === 'close' ? confirmedRunId : control.worker?.runId;
   const expectedSettings = control.settings;
   let settings;
+  if (['settings', 'start'].includes(command)) updateBoardingConstraints();
   if (command === 'settings') {
     if (!elements['control-form'].reportValidity()) return;
     try { settings = readSettings(); } catch (error) { controlFeedback(error.message); return; }
@@ -611,6 +652,7 @@ async function runControlCommand(command, slot, confirmedRunId) {
     if (!authenticated || epoch !== controlEpoch) return;
     if (!control.enabled || control.busy || control.externalRun) throw new UserMessage(control.error || 'Mac 目前無法接受這項操作，請確認最新狀態。');
     if (['settings', 'start'].includes(command) && controlLocked()) throw new UserMessage('搶位程式已啟動；請先結束程式，再變更設定。');
+    if (['settings', 'start'].includes(command) && !updateBoardingConstraints()) throw new UserMessage('請重新選擇可選範圍內的乘船日期與時間，再儲存設定。');
     if (command === 'start' && (settingsDirty || !sameSettings(expectedSettings, control.settings))) throw new UserMessage('搶位設定已變更，請確認畫面上的設定，再按開始搶位。');
     if (['stop', 'close', 'handoff'].includes(command)) {
       if (!expectedRunId || control.worker?.runId !== expectedRunId || control.worker.closed) throw new UserMessage('本次執行狀態已變更，請確認最新狀態後再操作。');

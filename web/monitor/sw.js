@@ -1,5 +1,5 @@
 const CACHE_PREFIX = 'takachiho-monitor-shell-';
-const CACHE_NAME = `${CACHE_PREFIX}v6`;
+const CACHE_NAME = `${CACHE_PREFIX}v7`;
 const SHELL_ASSETS = [
   '/', '/styles.css', '/app.js', '/manifest.webmanifest',
   '/icons/icon.svg', '/icons/icon-192.png', '/icons/icon-512.png',

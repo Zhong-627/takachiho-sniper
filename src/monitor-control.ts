@@ -10,6 +10,7 @@ import type { MonitorSnapshot } from './monitor-state.js';
 import type { WorkerStatus } from './reservation-runner.js';
 import { readWorkerStatus, sendWorkerCommand } from './worker-client.js';
 import { hasLegacyReservationProcess } from './monitor-process.js';
+import { boardingDateAllowed, boardingDateRange, boardingSlotAllowed, type BoardingDateRange } from './monitor-targets.js';
 
 const settingsSchema = z.object({
   targetDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/u),
@@ -31,6 +32,7 @@ export interface ControlSnapshot {
   worker: WorkerStatus | null;
   externalRun: boolean;
   error: string | null;
+  targetDateRange?: BoardingDateRange;
 }
 export class ControlFailure extends Error {
   constructor(message: string, readonly status = 409) { super(message); }
@@ -68,6 +70,17 @@ function defaultSettings(config: AppConfig): ControlSettings {
     baseDelayMs: config.polling.baseDelayMs, manualCustomerForm: false,
     slots: config.slots.map((slot) => ({ slot, customerProfile: slot })),
   };
+}
+
+/** Read legacy settings unchanged; enforce current target choices only on save/start. */
+function assertBoardingTargets(settings: ControlSettings): void {
+  const range = boardingDateRange();
+  if (!boardingDateAllowed(settings.targetDate, range)) {
+    throw new ControlFailure(`乘船日期只能選擇日本當天至目前開放預約的日期（${range.min} 至 ${range.max}）。`, 400);
+  }
+  if (settings.slots.some(({ slot }) => !boardingSlotAllowed(slot))) {
+    throw new ControlFailure('乘船時間只能選擇 08:00 至 16:00，每 30 分鐘一個時段（日本時間）。', 400);
+  }
 }
 
 /** Target selections contain no customer values; the original local config stays intact. */
@@ -219,10 +232,10 @@ export function createMonitorControl(options: MonitorControlOptions): MonitorCon
     try {
       const { settings, profiles } = await load();
       return { enabled: !workerError, demo: false, busy, settings, profiles, worker,
-        externalRun, error: workerError ?? launchError ?? lastError };
+        externalRun, error: workerError ?? launchError ?? lastError, targetDateRange: boardingDateRange() };
     } catch {
       return { enabled: !workerError && !!worker && !worker.closed, demo: false, busy, settings: null, profiles: [], worker,
-        externalRun, error: workerError ?? '本機搶位設定無法使用，請在 Mac 檢查 config/config.local.json。' };
+        externalRun, error: workerError ?? '本機搶位設定無法使用，請在 Mac 檢查 config/config.local.json。', targetDateRange: boardingDateRange() };
     }
   };
 
@@ -250,6 +263,7 @@ export function createMonitorControl(options: MonitorControlOptions): MonitorCon
       await assertIdle();
       const base = await loadConfig(configPath);
       const { settings } = applyControlSettings(base, value, options.artifactsDir);
+      assertBoardingTargets(settings);
       await mkdir(directory, { recursive: true, mode: 0o700 });
       await writePrivate(settingsPath, settings);
     }),
@@ -263,6 +277,7 @@ export function createMonitorControl(options: MonitorControlOptions): MonitorCon
           throw new ControlFailure('搶位設定已被更新，請重新整理確認日期與時段後再啟動。');
         }
       }
+      assertBoardingTargets(settings);
       try { await runtime.preflight(config, settings.manualCustomerForm); }
       catch { throw new ControlFailure('啟動檢查未通過：請確認監控截止尚未過期、各船代表人不同、個資與瀏覽器設定完整。', 400); }
       await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -272,7 +287,11 @@ export function createMonitorControl(options: MonitorControlOptions): MonitorCon
       const intent: LaunchIntent = { runId, snapshotPath: path, targetDate: config.targetDate, slots: config.slots, createdAt: Date.now() };
       try { await writeFile(intentPath, `${JSON.stringify(intent)}\n`, { mode: 0o600, flag: 'wx' }); }
       catch { await rm(path, { force: true }); throw new ControlFailure('另一個啟動要求正在處理，請重新整理。'); }
-      try { await runtime.launch(path, settings.manualCustomerForm, runId); }
+      try {
+        // Preflight and snapshot writes may cross Japan midnight; recheck before launch.
+        assertBoardingTargets(settings);
+        await runtime.launch(path, settings.manualCustomerForm, runId);
+      }
       catch (error) { await removeIntent(runId); await rm(path, { force: true }); throw error; }
       for (let attempt = 0; attempt < 50; attempt += 1) {
         let worker: WorkerStatus | null = null;
@@ -310,9 +329,8 @@ export function createMonitorControl(options: MonitorControlOptions): MonitorCon
 
 /** A functional control rehearsal without config reads, processes or site traffic. */
 export function createDemoControl(): MonitorControl & { monitorSnapshot(): MonitorSnapshot } {
-  const today = new Date(Date.now() + 14 * 86_400_000).toISOString().slice(0, 10);
   let settings: ControlSettings = {
-    targetDate: today, releaseAt: new Date(Date.now() + 120_000).toISOString(),
+    targetDate: boardingDateRange().max, releaseAt: new Date(Date.now() + 120_000).toISOString(),
     monitorFrom: new Date(Date.now()).toISOString(), monitorUntil: new Date(Date.now() + 7_200_000).toISOString(),
     baseDelayMs: 750, manualCustomerForm: false,
     slots: [{ slot: '11:00', customerProfile: '11:00' }, { slot: '11:30', customerProfile: '11:30' }],
@@ -328,7 +346,7 @@ export function createDemoControl(): MonitorControl & { monitorSnapshot(): Monit
     tick();
     return { enabled: true, demo: true, busy: false, settings: structuredClone(settings),
       profiles: [{ id: '11:00', label: '船 1 的演示資料' }, { id: '11:30', label: '船 2 的演示資料' }],
-      worker: worker ? structuredClone(worker) : null, externalRun: false, error: null };
+      worker: worker ? structuredClone(worker) : null, externalRun: false, error: null, targetDateRange: boardingDateRange() };
   };
   return {
     monitorSnapshot: () => {
@@ -356,6 +374,7 @@ export function createDemoControl(): MonitorControl & { monitorSnapshot(): Monit
         || parsed.data.slots.some((entry) => !['11:00', '11:30'].includes(entry.customerProfile))
         || Date.parse(parsed.data.monitorFrom) > Date.parse(parsed.data.releaseAt)
         || Date.parse(parsed.data.monitorUntil) <= Date.parse(parsed.data.releaseAt)) throw new ControlFailure('演示設定格式不正確。', 400);
+      assertBoardingTargets(parsed.data);
       settings = parsed.data;
       return state();
     },
@@ -364,6 +383,7 @@ export function createDemoControl(): MonitorControl & { monitorSnapshot(): Monit
       if (expectedSettings !== undefined && JSON.stringify(settingsSchema.safeParse(expectedSettings).data) !== JSON.stringify(settings)) {
         throw new ControlFailure('演示設定已被更新，請重新整理。');
       }
+      assertBoardingTargets(settings);
       startedAt = Date.now();
       worker = { runId: randomUUID(), targetDate: settings.targetDate,
         slots: settings.slots.map(({ slot }) => ({ slot, active: true, handedOff: false, canHandoff: false, holdConfirmed: false })),

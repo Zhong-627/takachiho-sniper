@@ -71,13 +71,19 @@ function controlFixture() {
     automationStopped: boolean; closed: boolean;
   };
   return { enabled: true, demo: true, busy: false, settings,
+    targetDateRange: { min: '2026-10-14', max: '2026-10-28' } as { min: string; max: string } | undefined,
     profiles: [{ id: 'customer1', label: '船 A' }, { id: 'customer2', label: '船 B' }],
     worker: null as Worker | null, externalRun: false, error: null as string | null };
 }
 
 async function controlledPage(simulatedPush = false, status?: MonitorSnapshot, timezoneId?: string,
-  viewport = { width: 390, height: 844, isMobile: true }) {
+  viewport = { width: 390, height: 844, isMobile: true }, options: {
+    now?: number; targetDateRange?: { min: string; max: string } | null;
+    settings?: Partial<ReturnType<typeof controlFixture>['settings']>; startEnabled?: boolean;
+  } = {}) {
   const control = controlFixture();
+  if (options.targetDateRange !== undefined) control.targetDateRange = options.targetDateRange || undefined;
+  if (options.settings) Object.assign(control.settings, options.settings);
   if (status) control.demo = false;
   const commands: Array<{ command: string; body: Record<string, unknown> }> = [];
   const failures = new Set<string>();
@@ -103,6 +109,7 @@ async function controlledPage(simulatedPush = false, status?: MonitorSnapshot, t
     Object.defineProperty(navigator, 'serviceWorker', { value: { ready: Promise.resolve(registration), register: async () => registration } });
   });
   const phone = await phoneContext.newPage();
+  if (options.now !== undefined) await phone.clock.setFixedTime(options.now);
   const phoneErrors: string[] = [];
   phone.on('pageerror', (error) => phoneErrors.push(error.message));
   await phone.route(/\/api\/control(?:\/[^/?]+)?$/, async (route) => {
@@ -141,7 +148,8 @@ async function controlledPage(simulatedPush = false, status?: MonitorSnapshot, t
   await phone.goto(origin, { waitUntil: 'domcontentloaded' });
   await phone.locator('#password').fill(password);
   await phone.locator('#login-submit').click();
-  await expect.poll(() => phone.locator('#control-start').isEnabled()).toBe(true);
+  await expect.poll(() => phone.locator('#control-fields').isEnabled()).toBe(true);
+  await expect.poll(() => phone.locator('#control-start').isEnabled()).toBe(options.startEnabled ?? true);
   return { phone, phoneContext, control, commands, failures, phoneErrors, pushSettings };
 }
 
@@ -239,6 +247,122 @@ async function scheduleValues(phone: Page): Promise<string[]> {
     .map((id) => phone.locator(`#${id}`).inputValue()));
 }
 
+it.each([
+  { now: '2026-10-12T23:59:59Z', min: '2026-10-13', max: '2026-10-26', timezoneId: 'America/Los_Angeles' },
+  { now: '2026-10-13T00:00:00Z', min: '2026-10-13', max: '2026-10-27', timezoneId: 'America/Los_Angeles' },
+  { now: '2026-10-13T14:59:59Z', min: '2026-10-13', max: '2026-10-27', timezoneId: 'America/Los_Angeles' },
+  { now: '2026-10-13T15:00:00Z', min: '2026-10-14', max: '2026-10-27', timezoneId: 'America/Los_Angeles' },
+  { now: '2026-10-12T23:59:59Z', min: '2026-10-13', max: '2026-10-26', timezoneId: 'Pacific/Auckland' },
+  { now: '2026-10-13T00:00:00Z', min: '2026-10-13', max: '2026-10-27', timezoneId: 'Pacific/Auckland' },
+  { now: '2026-10-13T14:59:59Z', min: '2026-10-13', max: '2026-10-27', timezoneId: 'Pacific/Auckland' },
+  { now: '2026-10-13T15:00:00Z', min: '2026-10-14', max: '2026-10-27', timezoneId: 'Pacific/Auckland' },
+])('limits boarding dates by Japan time at $now in device timezone $timezoneId', async ({ now, min, max, timezoneId }) => {
+  const timestamp = Date.parse(now);
+  const { phone, phoneContext, commands, phoneErrors } = await controlledPage(false,
+    { ...idleControlStatus(), serverTime: timestamp }, timezoneId, undefined, { now: timestamp, targetDateRange: null });
+  try {
+    await openSettings(phone, false);
+    expect(await phone.evaluate(() => Intl.DateTimeFormat().resolvedOptions().timeZone)).toBe(timezoneId);
+    expect(await phone.locator('#setting-date').getAttribute('type')).toBe('date');
+    expect(await phone.locator('#setting-date').getAttribute('min')).toBe(min);
+    expect(await phone.locator('#setting-date').getAttribute('max')).toBe(max);
+    for (const date of [min, max]) {
+      await phone.locator('#setting-date').fill(date);
+      expect(await phone.locator('#setting-date').evaluate((element) => (element as HTMLInputElement).validity.valid)).toBe(true);
+    }
+    expect(commands).toEqual([]);
+    expect(phoneErrors).toEqual([]);
+  } finally { await phoneContext.close(); }
+}, 30_000);
+
+it('uses the server boarding date range and updates calendar limits when the range refreshes', async () => {
+  const timestamp = Date.parse('2026-10-13T00:00:00Z');
+  const { phone, phoneContext, control, commands, phoneErrors } = await controlledPage(false,
+    { ...idleControlStatus(), serverTime: timestamp }, 'America/Los_Angeles', undefined, { now: timestamp });
+  try {
+    await openSettings(phone, false);
+    expect(await phone.locator('#setting-date').getAttribute('min')).toBe('2026-10-14');
+    expect(await phone.locator('#setting-date').getAttribute('max')).toBe('2026-10-28');
+    control.targetDateRange = { min: '2026-10-15', max: '2026-10-29' };
+    await phone.locator('#refresh').click();
+    await expect.poll(() => phone.locator('#setting-date').getAttribute('min')).toBe('2026-10-15');
+    expect(await phone.locator('#setting-date').getAttribute('max')).toBe('2026-10-29');
+    expect(commands).toEqual([]);
+    expect(phoneErrors).toEqual([]);
+  } finally { await phoneContext.close(); }
+}, 30_000);
+
+it.each(['2026-10-13', '2026-10-29'])('requires correction of saved boarding date %s before saving or starting', async (targetDate) => {
+  const { phone, phoneContext, control, commands, phoneErrors } = await controlledPage(false, idleControlStatus(), undefined, undefined,
+    { settings: { targetDate }, startEnabled: false });
+  try {
+    await openSettings(phone, false);
+    expect(await phone.locator('#setting-date').inputValue()).toBe(targetDate);
+    expect(await phone.locator('#setting-date').evaluate((element) => (element as HTMLInputElement).validity.valid)).toBe(false);
+    expect(await phone.locator('#control-start').isDisabled()).toBe(true);
+    await phone.locator('#control-start').evaluate((element) => (element as HTMLButtonElement).click());
+    await phone.locator('#slot-1-time').selectOption('12:00');
+    await phone.locator('#control-save').click();
+    await expect.poll(() => phone.locator('#control-feedback').textContent()).toContain('檢查');
+    expect(commands).toEqual([]);
+    expect(control.settings.targetDate).toBe(targetDate);
+    await phone.locator('#setting-date').fill('2026-10-14');
+    expect(await phone.locator('#setting-date').evaluate((element) => (element as HTMLInputElement).validity.valid)).toBe(true);
+    await phone.locator('#control-save').click();
+    await expect.poll(() => phone.locator('#control-start').isEnabled()).toBe(true);
+    expect(commands).toMatchObject([{ command: 'settings', body: { targetDate: '2026-10-14' } }]);
+    expect(phoneErrors).toEqual([]);
+  } finally { await phoneContext.close(); }
+}, 30_000);
+
+it('offers exactly 17 half-hour boarding choices from 08:00 through 16:00 and saves both endpoints', async () => {
+  const { phone, phoneContext, control, commands, phoneErrors } = await controlledPage(false, idleControlStatus());
+  try {
+    await openSettings(phone, false);
+    const expected = Array.from({ length: 17 }, (_, index) => `${String(8 + Math.floor(index / 2)).padStart(2, '0')}:${index % 2 ? '30' : '00'}`);
+    for (const index of [1, 2]) {
+      const choices = await phone.locator(`#slot-${index}-time`).evaluate((element) => {
+        const select = element as HTMLSelectElement;
+        return { tag: select.tagName, required: select.required, values: Array.from(select.options, (option) => option.value) };
+      });
+      expect(choices).toEqual({ tag: 'SELECT', required: true, values: ['', ...expected] });
+      expect(choices.values).not.toContain('08:15');
+    }
+    await phone.locator('#slot-1-time').selectOption('08:00');
+    await phone.locator('#slot-2-time').selectOption('16:00');
+    await phone.locator('#control-save').click();
+    await expect.poll(() => phone.locator('#control-start').isEnabled()).toBe(true);
+    expect(control.settings.slots).toEqual([
+      { slot: '08:00', customerProfile: 'customer1' }, { slot: '16:00', customerProfile: 'customer2' },
+    ]);
+    expect(commands).toHaveLength(1);
+    expect(phoneErrors).toEqual([]);
+  } finally { await phoneContext.close(); }
+}, 30_000);
+
+it('requires an explicit replacement for an unsupported saved boarding time', async () => {
+  const { phone, phoneContext, control, commands, phoneErrors } = await controlledPage(false, idleControlStatus(), undefined, undefined, {
+    settings: { slots: [{ slot: '08:15', customerProfile: 'customer1' }, { slot: '11:30', customerProfile: 'customer2' }] },
+    startEnabled: false,
+  });
+  try {
+    await openSettings(phone, false);
+    expect(await phone.locator('#slot-1-time').inputValue()).toBe('');
+    expect(control.settings.slots[0]?.slot).toBe('08:15');
+    expect(await phone.locator('#control-start').isDisabled()).toBe(true);
+    await phone.locator('#slot-1-profile').selectOption('customer2');
+    await phone.locator('#control-save').click();
+    await expect.poll(() => phone.locator('#control-feedback').textContent()).toContain('檢查');
+    expect(commands).toEqual([]);
+    await phone.locator('#slot-1-time').selectOption('08:00');
+    await phone.locator('#control-save').click();
+    await expect.poll(() => phone.locator('#control-start').isEnabled()).toBe(true);
+    expect(control.settings.slots[0]?.slot).toBe('08:00');
+    expect(commands).toHaveLength(1);
+    expect(phoneErrors).toEqual([]);
+  } finally { await phoneContext.close(); }
+}, 30_000);
+
 it('opens progress after login, preserves settings drafts across tabs, and returns to progress after a verified start', async () => {
   const { phone, phoneContext, control, commands, phoneErrors } = await controlledPage(false, idleControlStatus());
   try {
@@ -257,7 +381,7 @@ it('opens progress after login, preserves settings drafts across tabs, and retur
     await expect.poll(() => phone.locator('#settings-tab').getAttribute('aria-selected')).toBe('true');
     await expect.poll(() => phone.locator('#control-start').isVisible()).toBe(true);
     expect(await phone.locator('#schedule-settings').evaluate((element) => (element as HTMLDetailsElement).open)).toBe(false);
-    await phone.locator('#slot-1-time').fill('12:00');
+    await phone.locator('#slot-1-time').selectOption('12:00');
     await expect.poll(() => phone.locator('#settings-tab-dirty').isVisible()).toBe(true);
     await expect.poll(() => phone.locator('#control-start').isDisabled()).toBe(true);
     await phone.locator('#progress-tab').click();
@@ -329,9 +453,9 @@ it.each([
     await phone.locator('#slot-2-enabled').check();
     await expectSettingFieldsToFit(phone, false);
     await phone.locator('#setting-date').fill('2026-10-27');
-    await phone.locator('#slot-1-time').fill('12:00');
+    await phone.locator('#slot-1-time').selectOption('12:00');
     await phone.locator('#slot-1-profile').selectOption('customer2');
-    await phone.locator('#slot-2-time').fill('12:30');
+    await phone.locator('#slot-2-time').selectOption('12:30');
     await phone.locator('#slot-2-profile').selectOption('customer1');
     await phone.locator('#setting-release-at').fill('2026-10-13T07:57');
     await phone.locator('#setting-delay').fill('1200');
@@ -412,7 +536,7 @@ it('keeps duplicate-slot feedback in the phone viewport when saving from the bot
   const { phone, phoneContext, commands, phoneErrors } = await controlledPage(false, idleControlStatus());
   try {
     await openSettings(phone);
-    await phone.locator('#slot-2-time').fill('11:00');
+    await phone.locator('#slot-2-time').selectOption('11:00');
     await phone.locator('#control-save').scrollIntoViewIfNeeded();
     expect(await phone.evaluate(() => window.scrollY)).toBeGreaterThan(0);
     await phone.locator('#control-save').click();
@@ -427,6 +551,12 @@ it('fills Taipei schedules on date changes, preserves manual edits and saved hyd
   const { phone, phoneContext, control, commands, phoneErrors } = await controlledPage(false, idleControlStatus(), 'America/Los_Angeles');
   try {
     await openSettings(phone);
+    for (const id of ['setting-monitor-from', 'setting-release-at', 'setting-monitor-until']) {
+      expect(await phone.locator(`#${id}`).getAttribute('type')).toBe('datetime-local');
+      expect(await phone.locator(`#${id}`).getAttribute('step')).toBe('1');
+      expect(await phone.locator(`#${id}`).getAttribute('min')).toBeNull();
+      expect(await phone.locator(`#${id}`).getAttribute('max')).toBeNull();
+    }
     expect(await scheduleValues(phone)).toEqual(['2026-10-12T21:50', '2026-10-12T23:00', '2026-10-13T01:00']);
     await phone.locator('#setting-date').fill('2026-10-27');
     expect(await scheduleValues(phone)).toEqual(['2026-10-13T07:48', '2026-10-13T07:55', '2026-10-13T10:05']);
@@ -434,11 +564,11 @@ it('fills Taipei schedules on date changes, preserves manual edits and saved hyd
     expect(await phone.locator('#control-save').isEnabled()).toBe(true);
     expect(await phone.locator('#control-start').isDisabled()).toBe(true);
 
-    const manual = ['2026-10-13T07:40', '2026-10-13T07:57', '2026-10-13T10:20'];
+    const manual = ['2026-10-13T07:40:13', '2026-10-13T07:57:29', '2026-10-13T10:20:47'];
     await phone.locator('#setting-monitor-from').fill(manual[0]!);
     await phone.locator('#setting-release-at').fill(manual[1]!);
     await phone.locator('#setting-monitor-until').fill(manual[2]!);
-    await phone.locator('#slot-1-time').fill('12:00');
+    await phone.locator('#slot-1-time').selectOption('12:00');
     await phone.locator('#slot-1-profile').selectOption('customer2');
     await phone.locator('#slot-2-profile').selectOption('customer1');
     await phone.locator('#slot-2-enabled').uncheck();
@@ -451,8 +581,8 @@ it('fills Taipei schedules on date changes, preserves manual edits and saved hyd
     await expect.poll(() => phone.locator('#control-feedback').textContent()).toContain('設定已儲存');
     expect(commands).toEqual([{ command: 'settings', body: control.settings }]);
     expect(control.settings).toMatchObject({
-      targetDate: '2026-10-27', monitorFrom: '2026-10-13T07:40+08:00',
-      releaseAt: '2026-10-13T07:57+08:00', monitorUntil: '2026-10-13T10:20+08:00',
+      targetDate: '2026-10-27', monitorFrom: '2026-10-13T07:40:13+08:00',
+      releaseAt: '2026-10-13T07:57:29+08:00', monitorUntil: '2026-10-13T10:20:47+08:00',
       slots: [{ slot: '12:00', customerProfile: 'customer2' }, { slot: '11:30', customerProfile: 'customer1' }],
     });
     await phone.reload({ waitUntil: 'domcontentloaded' });
@@ -489,7 +619,9 @@ it.each([
   { targetDate: '2028-03-14', scheduleDate: '2028-02-29', timezoneId: 'America/New_York' },
   { targetDate: '2026-03-10', scheduleDate: '2026-02-24', timezoneId: 'America/New_York' },
 ])('subtracts 14 calendar days from $targetDate independently of device timezone $timezoneId', async ({ targetDate, scheduleDate, timezoneId }) => {
-  const { phone, phoneContext, commands, phoneErrors } = await controlledPage(false, idleControlStatus(), timezoneId);
+  const { phone, phoneContext, commands, phoneErrors } = await controlledPage(false, idleControlStatus(), timezoneId, undefined, {
+    targetDateRange: { min: scheduleDate, max: targetDate }, settings: { targetDate: scheduleDate },
+  });
   try {
     await openSettings(phone);
     expect(await phone.evaluate(() => Intl.DateTimeFormat().resolvedOptions().timeZone)).toBe(timezoneId);
@@ -531,7 +663,7 @@ it('saves one selected slot or two independent slots with explicit Taipei schedu
     await expect.poll(() => phone.locator('#setting-date').isEnabled()).toBe(true);
     await openSettings(phone);
     await phone.locator('#slot-2-enabled').check();
-    await phone.locator('#slot-2-time').fill('12:00');
+    await phone.locator('#slot-2-time').selectOption('12:00');
     await phone.locator('#slot-2-profile').selectOption('customer1');
     await phone.locator('#control-save').click();
     await expect.poll(() => control.settings.slots.length).toBe(2);
@@ -566,7 +698,7 @@ it('keeps ride settings editable when the latest run is historical and no worker
       expect(await phone.locator(`#${id}`).isEnabled()).toBe(true);
     }
     await phone.locator('#setting-date').fill('2026-10-27');
-    await phone.locator('#slot-1-time').fill('12:00');
+    await phone.locator('#slot-1-time').selectOption('12:00');
     await phone.locator('#setting-monitor-from').fill('2026-10-13T21:50');
     await phone.locator('#setting-release-at').fill('2026-10-13T23:00');
     await phone.locator('#setting-monitor-until').fill('2026-10-14T01:00');

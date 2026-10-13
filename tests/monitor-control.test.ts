@@ -1,18 +1,22 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseConfig } from '../src/config.js';
 import { applyControlSettings, createDemoControl, createMonitorControl, type ControlSettings } from '../src/monitor-control.js';
 import { MonitorState, type MonitorSnapshot } from '../src/monitor-state.js';
+import { boardingDateRange } from '../src/monitor-targets.js';
 import type { WorkerStatus } from '../src/reservation-runner.js';
 
 const directories: string[] = [];
-afterEach(async () => { await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+});
 
 function fixture() {
   const releaseAt = new Date(Date.now() + 120_000).toISOString();
-  return parseConfig({ targetDate: '2026-11-04', releaseAt,
+  return parseConfig({ targetDate: boardingDateRange().max, releaseAt,
     monitorFrom: new Date(Date.now()).toISOString(), monitorUntil: new Date(Date.now() + 7200_000).toISOString(),
     slots: ['11:00', '11:30'], customers: {
       '11:00': { representativeName: 'PRIVATE_PERSON_A', fields: { email: 'PRIVATE_EMAIL_A' }, mappings: [] },
@@ -86,6 +90,91 @@ describe('PWA target control', () => {
     ]) expect(() => applyControlSettings(base, value)).toThrow();
   });
 
+  it('rejects dates outside the current Japan range and slots outside the half-hour boarding choices on save', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-13T09:00:00+09:00'));
+    const test = await setup();
+    const state = await test.control.snapshot();
+    expect(state.targetDateRange).toEqual({ min: '2026-10-13', max: '2026-10-27' });
+    for (const targetDate of ['2026-10-12', '2026-10-28']) {
+      await expect(test.control.save({ ...selection(), targetDate })).rejects.toThrow('乘船日期只能');
+    }
+    for (const slot of ['07:30', '08:01', '11:15', '16:30']) {
+      await expect(test.control.save({ ...selection(), slots: [{ slot, customerProfile: '11:00' }] })).rejects.toThrow('乘船時間只能');
+    }
+    expect((await test.control.snapshot()).settings).toEqual(state.settings);
+    expect(test.launch).not.toHaveBeenCalled();
+    const saved = await test.control.save({ ...selection(), targetDate: '2026-10-13',
+      slots: [{ slot: '08:00', customerProfile: '11:00' }, { slot: '16:00', customerProfile: '11:30' }] });
+    expect(saved.settings?.slots.map(({ slot }) => slot)).toEqual(['08:00', '16:00']);
+  });
+
+  it('keeps legacy default targets readable and editable but rejects their save and start', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-13T09:00:00+09:00'));
+    for (const legacy of [
+      { ...fixture(), targetDate: '2026-10-12' },
+      { ...fixture(), slots: ['07:45'], customers: { '07:45': fixture().customers['11:00']! } },
+    ]) {
+      const test = await setup();
+      await writeFile(test.configPath, JSON.stringify(legacy));
+      const state = await test.control.snapshot();
+      expect(state.enabled).toBe(true);
+      expect(state.settings?.targetDate).toBe(legacy.targetDate);
+      expect(state.settings?.slots.map(({ slot }) => slot)).toEqual(legacy.slots);
+      await expect(test.control.save(state.settings)).rejects.toThrow(/乘船日期只能|乘船時間只能/u);
+      await expect(test.control.start(true, state.settings)).rejects.toThrow(/乘船日期只能|乘船時間只能/u);
+      expect(test.launch).not.toHaveBeenCalled();
+      expect(await readFile(test.configPath, 'utf8')).toBe(JSON.stringify(legacy));
+      const corrected = { ...state.settings!, targetDate: boardingDateRange().max,
+        slots: state.settings!.slots.map((entry, index) => ({ ...entry, slot: index ? '08:30' : '08:00' })) };
+      expect((await test.control.save(corrected)).settings).toEqual(corrected);
+      await test.control.start(true);
+      expect(test.launch).toHaveBeenCalledOnce();
+    }
+  });
+
+  it('rechecks saved targets at start after Japan midnight without altering the saved selection', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-13T23:59:59+09:00'));
+    const test = await setup();
+    const settings = { ...selection(), targetDate: '2026-10-13' };
+    await test.control.save(settings);
+    now.mockReturnValue(Date.parse('2026-10-14T00:00:00+09:00'));
+    const state = await test.control.snapshot();
+    expect(state.settings).toEqual(settings);
+    expect(state.targetDateRange).toEqual({ min: '2026-10-14', max: '2026-10-27' });
+    await expect(test.control.start(true, settings)).rejects.toThrow('乘船日期只能');
+    expect(test.launch).not.toHaveBeenCalled();
+    expect(JSON.parse(await readFile(join(test.directory, 'control', 'settings.json'), 'utf8'))).toEqual(settings);
+  });
+
+  it('rechecks the target after asynchronous preflight crosses Japan midnight and removes pending launch files', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-13T23:59:59+09:00'));
+    const test = await setup();
+    await writeFile(test.configPath, JSON.stringify({ ...fixture(), targetDate: '2026-10-13' }));
+    const directory = join(test.directory, 'control');
+    const launch = vi.fn(async () => undefined);
+    const preflight = vi.fn(async () => {
+      now.mockReturnValue(Date.parse('2026-10-14T00:00:00+09:00'));
+    });
+    const control = createMonitorControl({ configPath: test.configPath, directory,
+      snapshot: () => new MonitorState('none').snapshot(),
+      runtime: { status: async () => null, launch, preflight, wait: async () => undefined } });
+    await expect(control.start(true)).rejects.toThrow('乘船日期只能');
+    expect(preflight).toHaveBeenCalledOnce();
+    expect(launch).not.toHaveBeenCalled();
+    expect(await readdir(directory)).toEqual([]);
+    expect((await control.snapshot()).settings?.targetDate).toBe('2026-10-13');
+  });
+
+  it('preserves arbitrary schedule minutes and seconds while constraining only boarding slots', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-13T09:00:00+09:00'));
+    const test = await setup();
+    const settings = { ...selection(), monitorFrom: '2026-10-13T07:48:13+08:00',
+      releaseAt: '2026-10-13T07:55:27+08:00', monitorUntil: '2026-10-13T10:05:49+08:00' };
+    expect((await test.control.save(settings)).settings).toEqual(settings);
+    await test.control.start(true);
+    expect(test.config()).toMatchObject({ monitorFrom: settings.monitorFrom, releaseAt: settings.releaseAt, monitorUntil: settings.monitorUntil });
+  });
+
   it('rejects a start reviewed against settings that another client has since changed', async () => {
     const test = await setup();
     const reviewed = (await test.control.snapshot()).settings;
@@ -141,6 +230,18 @@ describe('PWA target control', () => {
     expect(state.enabled).toBe(true);
     expect(state.settings).toBeNull();
     expect(state.worker?.runId).toBe(started.worker!.runId);
+    expect((await test.control.command('stop', started.worker!.runId)).worker?.automationStopped).toBe(true);
+    expect((await test.control.command('close', started.worker!.runId)).worker).toBeNull();
+  });
+
+  it('keeps active worker controls available when local defaults no longer meet target restrictions', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-13T09:00:00+09:00'));
+    const test = await setup();
+    const started = await test.control.start(true);
+    await writeFile(test.configPath, JSON.stringify({ ...fixture(), targetDate: '2026-10-12' }));
+    const state = await test.control.snapshot();
+    expect(state.enabled).toBe(true);
+    expect(state.settings?.targetDate).toBe('2026-10-12');
     expect((await test.control.command('stop', started.worker!.runId)).worker?.automationStopped).toBe(true);
     expect((await test.control.command('close', started.worker!.runId)).worker).toBeNull();
   });
@@ -281,6 +382,23 @@ describe('PWA target control', () => {
     await control.command('handoff', started.worker!.runId, settings.slots[0]!.slot);
     expect(control.monitorSnapshot().slots[0]?.phase).toBe('handed-off');
     await control.command('close', started.worker!.runId);
+    expect(control.monitorSnapshot().run).toBeNull();
+  });
+
+  it('applies the same date and boarding choices in demo while preserving unrestricted schedules', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-13T08:59:59+09:00'));
+    const control = createDemoControl();
+    const state = await control.snapshot();
+    expect(state.targetDateRange).toEqual({ min: '2026-10-13', max: '2026-10-26' });
+    expect(state.settings?.targetDate).toBe('2026-10-26');
+    await expect(control.save({ ...state.settings, targetDate: '2026-10-27' })).rejects.toThrow('乘船日期只能');
+    await expect(control.save({ ...state.settings, slots: [{ slot: '11:15', customerProfile: '11:00' }] })).rejects.toThrow('乘船時間只能');
+    const settings = { ...state.settings!, targetDate: '2026-10-13', monitorFrom: '2026-10-13T07:48:00+08:00',
+      releaseAt: '2026-10-13T07:55:00+08:00', monitorUntil: '2026-10-13T10:05:00+08:00' };
+    expect((await control.save(settings)).settings).toEqual(settings);
+    now.mockReturnValue(Date.parse('2026-10-14T00:00:00+09:00'));
+    expect((await control.snapshot()).settings).toEqual(settings);
+    await expect(control.start(true)).rejects.toThrow('乘船日期只能');
     expect(control.monitorSnapshot().run).toBeNull();
   });
 });
