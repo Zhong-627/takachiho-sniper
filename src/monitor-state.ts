@@ -12,6 +12,8 @@ export interface MonitorSlot {
   /** Successful hold survives later autofill/manual phase changes. */
   holdConfirmed?: boolean;
   heldAt?: number | null;
+  /** First explicit monitoring deadline survives later handoff or phase changes. */
+  deadlineReachedAt?: number | null;
 }
 
 export interface MonitorSnapshot {
@@ -20,6 +22,10 @@ export interface MonitorSnapshot {
   connection: 'waiting' | 'live' | 'stale' | 'ended';
   updatedAt: number | null;
   heartbeatAt: number | null;
+  /** Explicit completion after every slot worker, including hold/autofill work, has settled. */
+  automationFinishedAt?: number | null;
+  /** Explicit stop before every worker finishes; later browser cleanup does not change completion. */
+  automationStoppedAt?: number | null;
   run: {
     id: string;
     targetDate: string | null;
@@ -46,7 +52,8 @@ function epoch(value: unknown): number | null {
 }
 
 function isoEpoch(value: unknown): number | null {
-  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,3})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/u.test(value)
+  // datetime-local omits zero seconds; both precisions are valid saved schedules.
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,3})?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/u.test(value)
     || date(value.slice(0, 10)) === null) return null;
   return epoch(Date.parse(value));
 }
@@ -78,6 +85,8 @@ export class MonitorState {
   private firstStartedAt: number | null = null;
   private updatedAt: number | null = null;
   private heartbeatAt: number | null = null;
+  private automationFinishedAt: number | null = null;
+  private automationStoppedAt: number | null = null;
   private ended = false;
   private stopped = false;
   private readonly id: string;
@@ -134,6 +143,8 @@ export class MonitorState {
       return;
     }
     if (event === 'automation_stopped' || event === 'automation_finished') {
+      if (event === 'automation_stopped' && this.automationFinishedAt === null) this.automationStoppedAt ??= at;
+      else if (event === 'automation_finished') this.automationFinishedAt ??= at;
       this.stopped = true;
       this.finishActive(at);
       this.note(at, event === 'automation_stopped' ? '自動化已停止' : '各時段自動化已結束');
@@ -234,7 +245,10 @@ export class MonitorState {
           case 'manual': update('manual', '需要人工接手'); break;
           case 'ambiguous': update('ambiguous', '暫留結果不明，需人工確認'); break;
           case 'failed': update('failed', '此時段自動化未完成'); break;
-          case 'deadline-reached': update('deadline', '已到監控截止時間'); break;
+          case 'deadline-reached':
+            slot.deadlineReachedAt ??= at;
+            update('deadline', '已到監控截止時間');
+            break;
           case 'exhausted': update('stopped', '此時段查詢已停止', { preserveTerminal: true }); break;
         }
         break;
@@ -245,6 +259,7 @@ export class MonitorState {
         update('manual', '需要人工接手');
         break;
       case 'monitoring_deadline_reached':
+        slot.deadlineReachedAt ??= at;
         update('deadline', '已到監控截止時間', { preserveTerminal: true });
         break;
       case 'slot_polling_exhausted':
@@ -270,6 +285,7 @@ export class MonitorState {
       schemaVersion: 1, serverTime,
       connection: !this.run ? 'waiting' : this.ended ? 'ended' : lastHealth !== null && serverTime - lastHealth > MONITOR_STALE_AFTER_MS ? 'stale' : 'live',
       updatedAt: this.updatedAt, heartbeatAt: this.heartbeatAt,
+      automationFinishedAt: this.automationFinishedAt, automationStoppedAt: this.automationStoppedAt,
       run: this.run ? { ...this.run } : null,
       slots: [...this.slots.values()].map((slot) => ({ ...slot })),
       recentEvents: this.history.map((event) => ({ ...event })),

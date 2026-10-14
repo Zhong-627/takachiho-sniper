@@ -75,6 +75,11 @@
             <div><strong id="attention-title"></strong><p id="attention-copy"></p></div>
             <button id="attention-open" class="secondary-button" type="button">查看進度與交接</button>
           </div>
+          <section id="reminder-panel" class="reminder-panel" aria-labelledby="reminder-heading" hidden>
+            <div><h2 id="reminder-heading">船位已暫留，正在持續提醒。</h2><p id="reminder-slots"></p><p class="reminder-copy">每 3 秒發送通知，直到你按停止。請回到 Mac 完成確認與付款。</p></div>
+            <button id="reminder-stop" class="secondary-button" type="button">停止提醒</button>
+          </section>
+          <p id="reminder-feedback" class="form-feedback" role="status" aria-live="polite" aria-atomic="true" hidden></p>
           <p id="control-feedback" class="form-feedback" role="status" aria-live="polite" aria-atomic="true" hidden></p>
 
           <nav id="dashboard-tabs" class="dashboard-tabs" role="tablist" aria-label="控制台分頁">
@@ -158,7 +163,7 @@
             </section>
 
             <section class="push-panel" aria-labelledby="push-heading">
-              <div><p class="eyebrow">A LITTLE HEADS-UP</p><h2 id="push-heading">搶到船位，通知這台手機。</h2><p id="push-copy" class="panel-copy">官方確認暫留後提醒你回到 Mac 接手確認、填單及付款。</p></div>
+              <div><p class="eyebrow">A LITTLE HEADS-UP</p><h2 id="push-heading">船位暫留、監控截止，都通知你。</h2><p id="push-copy" class="panel-copy">官方確認暫留後每 3 秒提醒，直到你按「停止提醒」；請回到 Mac 完成確認與付款。監控截止後，等各時段最後結果確認，再通知一次完整摘要。</p></div>
               <div class="push-actions"><button id="push-enable" class="secondary-button" type="button" disabled>啟用通知</button><button id="push-test" class="secondary-button" type="button" hidden>測試通知</button><button id="push-disable" class="text-button" type="button" hidden>停用這台裝置</button></div>
               <p id="push-feedback" class="form-feedback" role="status" aria-live="polite" aria-atomic="true"></p>
             </section>

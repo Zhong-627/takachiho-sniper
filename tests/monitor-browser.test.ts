@@ -10,6 +10,7 @@ import { createDiagnostics, type Diagnostics } from '../src/diagnostics.js';
 import { ArtifactsMonitor } from '../src/monitor-source.js';
 import { createMonitorServer } from '../src/monitor-server.js';
 import type { MonitorSnapshot } from '../src/monitor-state.js';
+import type { MonitorReminder } from '../src/monitor-push.js';
 
 const password = 'only-for-local-pwa-fixture';
 let directory: string;
@@ -87,7 +88,7 @@ async function controlledPage(simulatedPush = false, status?: MonitorSnapshot, t
   if (status) control.demo = false;
   const commands: Array<{ command: string; body: Record<string, unknown> }> = [];
   const failures = new Set<string>();
-  const pushSettings = { available: simulatedPush, publicKey: simulatedPush ? 'dGVzdA' : null };
+  const pushSettings = { available: simulatedPush, publicKey: simulatedPush ? 'dGVzdA' : null, reminders: [] as MonitorReminder[] };
   const phoneContext = await browser.newContext({ viewport: { width: viewport.width, height: viewport.height }, isMobile: viewport.isMobile, timezoneId });
   if (simulatedPush) await phoneContext.addInitScript(() => {
     const state = { permissionRequests: 0, subscribed: false, subscribeCalls: 0, unsubscribeCalls: 0 };
@@ -831,6 +832,121 @@ it('rolls back a rejected new push subscription, retries an unregistered device,
   } finally { await phoneContext.close(); }
 }, 30_000);
 
+it('polls reminders without a push subscription and stops only the groups shown when pressed', async () => {
+  const { phone, phoneContext, pushSettings, phoneErrors } = await controlledPage(false, idleControlStatus());
+  const reminder = (id: string, slot: string): MonitorReminder => ({ id: id.repeat(64), runId: 'run-reminders', targetDate: '2026-10-26', slot, startedAt: Date.now() });
+  const first = reminder('a', '11:00');
+  const second = reminder('b', '11:30');
+  const later = reminder('c', '12:00');
+  const stopped: string[][] = [];
+  let pushReads = 0;
+  let release!: () => void;
+  let announce!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const requested = new Promise<void>((resolve) => { announce = resolve; });
+  phone.on('request', (request) => { if (new URL(request.url()).pathname === '/api/push') pushReads += 1; });
+  try {
+    pushSettings.available = true;
+    pushSettings.reminders = [first, second];
+    await phone.route(/\/api\/push\/stop$/, async (route) => {
+      const ids = (route.request().postDataJSON() as { reminderIds: string[] }).reminderIds;
+      stopped.push(ids);
+      if (stopped.length === 1) {
+        announce();
+        await gate;
+        // A different held slot arrives while acknowledgement is in flight.
+        pushSettings.reminders.push(later);
+      }
+      pushSettings.reminders = pushSettings.reminders.filter((item) => !ids.includes(item.id));
+      await route.fulfill({ json: { ok: true } });
+    });
+    await expect.poll(() => phone.locator('#reminder-panel').isVisible(), { timeout: 7000 }).toBe(true);
+    expect(await phone.locator('#reminder-slots').textContent()).toBe('2026-10-26 11:00 · 2026-10-26 11:30');
+    expect(await phone.locator('#reminder-stop').isEnabled()).toBe(true);
+    expect(await phone.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await captureControlScreenshots(phone, 'reminders-active');
+    await openSettings(phone, false);
+    expect(await phone.locator('#reminder-stop').isVisible()).toBe(true);
+    expect(await phone.locator('#push-test').isVisible()).toBe(false);
+    await phone.locator('#progress-tab').click();
+    expect(stopped).toEqual([]);
+    const readsBeforeStop = pushReads;
+    await phone.locator('#reminder-stop').click();
+    await requested;
+    expect(await phone.locator('#reminder-stop').isDisabled()).toBe(true);
+    release();
+    await expect.poll(() => phone.locator('#reminder-feedback').textContent()).toContain('已停止目前提醒');
+    expect(stopped).toEqual([[first.id, second.id]]);
+    expect(pushReads).toBeGreaterThan(readsBeforeStop);
+    expect(await phone.locator('#reminder-slots').textContent()).toBe('2026-10-26 12:00');
+    await phone.locator('#reminder-stop').click();
+    await expect.poll(() => phone.locator('#reminder-panel').isVisible()).toBe(false);
+    expect(stopped).toEqual([[first.id, second.id], [later.id]]);
+    expect(phoneErrors).toEqual([]);
+  } finally { release(); await phoneContext.close(); }
+}, 30_000);
+
+it('keeps failed reminders available, disables stop offline, and clears them when the session expires', async () => {
+  const { phone, phoneContext, pushSettings, phoneErrors } = await controlledPage(false, idleControlStatus());
+  let status = 503;
+  let stopRequests = 0;
+  try {
+    pushSettings.available = true;
+    pushSettings.reminders = [{ id: 'a'.repeat(64), runId: 'run-reminders', slot: '11:00', targetDate: null, startedAt: Date.now() }];
+    await phone.route(/\/api\/push\/stop$/, (route) => {
+      stopRequests += 1;
+      return route.fulfill({ status, json: { error: '提醒尚未停止，請稍後再試。' } });
+    });
+    await expect.poll(() => phone.locator('#reminder-stop').isVisible(), { timeout: 7000 }).toBe(true);
+    await phone.locator('#reminder-stop').click();
+    await expect.poll(() => phone.locator('#reminder-feedback').textContent()).toBe('提醒尚未停止，請稍後再試。');
+    expect(await phone.locator('#reminder-stop').isEnabled()).toBe(true);
+    await phoneContext.setOffline(true);
+    await expect.poll(() => phone.locator('#reminder-stop').isDisabled()).toBe(true);
+    expect(stopRequests).toBe(1);
+    await phoneContext.setOffline(false);
+    await expect.poll(() => phone.locator('#reminder-stop').isEnabled()).toBe(true);
+    status = 401;
+    await phone.locator('#reminder-stop').click();
+    await expect.poll(() => phone.locator('#login-view').isVisible()).toBe(true);
+    expect(await phone.locator('#reminder-panel').isVisible()).toBe(false);
+    expect(await phone.locator('#reminder-feedback').textContent()).toBe('');
+    expect(stopRequests).toBe(2);
+    expect(phoneErrors).toEqual([]);
+  } finally { await phoneContext.close(); }
+}, 30_000);
+
+it('does not restore stale reminders when an older status request finishes after stopping', async () => {
+  const { phone, phoneContext, pushSettings, phoneErrors } = await controlledPage(false, idleControlStatus());
+  let holdStatus = true;
+  let release!: () => void;
+  let announce!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const requested = new Promise<void>((resolve) => { announce = resolve; });
+  try {
+    pushSettings.available = true;
+    pushSettings.reminders = [{ id: 'a'.repeat(64), runId: 'run-reminders', slot: '11:00', targetDate: null, startedAt: Date.now() }];
+    await expect.poll(() => phone.locator('#reminder-stop').isVisible(), { timeout: 7000 }).toBe(true);
+    await phone.route(/\/api\/push$/, async (route) => {
+      const value = structuredClone(pushSettings);
+      if (holdStatus) { holdStatus = false; announce(); await gate; }
+      await route.fulfill({ json: value }).catch(() => undefined);
+    });
+    await phone.route(/\/api\/push\/stop$/, async (route) => {
+      pushSettings.reminders = [];
+      await route.fulfill({ json: { ok: true } });
+    });
+    await phone.locator('#refresh').click();
+    await requested;
+    await phone.locator('#reminder-stop').click();
+    await expect.poll(() => phone.locator('#reminder-feedback').textContent()).toContain('已停止目前提醒');
+    release();
+    await phone.locator('#refresh').click();
+    await expect.poll(() => phone.locator('#reminder-panel').isVisible()).toBe(false);
+    expect(phoneErrors).toEqual([]);
+  } finally { release(); await phoneContext.close(); }
+}, 30_000);
+
 it('never sends controls to an external run or a replacement run, and does not invent missing settings', async () => {
   const { phone, phoneContext, control, commands } = await controlledPage();
   try {
@@ -907,7 +1023,7 @@ it('shows push reminders and opens only the same-origin control page on notifica
   let work = Promise.resolve();
   listeners.get('push')!({ data: { json: () => ({ title: '11:00 已暫留', body: '請到 Mac 填單付款。', tag: 'one-hold', url: 'https://unexpected.example' }) }, waitUntil: (value: Promise<void>) => { work = value; } });
   await work;
-  expect(notifications).toEqual([{ title: '11:00 已暫留', options: expect.objectContaining({ body: '請到 Mac 填單付款。', tag: 'one-hold', data: { url: '/' } }) }]);
+  expect(notifications).toEqual([{ title: '11:00 已暫留', options: expect.objectContaining({ body: '請到 Mac 填單付款。', tag: 'one-hold', silent: false, data: { url: '/' } }) }]);
   const click = { notification: { close: () => { closed = true; }, data: { url: 'https://unexpected.example' } }, waitUntil: (value: Promise<void>) => { work = value; } };
   listeners.get('notificationclick')!(click);
   await work;

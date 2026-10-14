@@ -14,6 +14,7 @@ const elements = Object.fromEntries([
   'progress-tab', 'settings-tab', 'progress-panel', 'settings-panel', 'settings-tab-dirty',
   'status-heading', 'review-settings', 'run-actions', 'schedule-summary', 'slot-2-options',
   'attention-banner', 'attention-title', 'attention-copy', 'attention-open',
+  'reminder-panel', 'reminder-slots', 'reminder-stop', 'reminder-feedback',
   'close-dialog', 'close-copy', 'close-confirm', 'close-cancel',
 ].map((id) => [id, document.getElementById(id)]));
 
@@ -67,6 +68,11 @@ let pushSubscription = null;
 let pushBusy = false;
 let pushNeedsRenew = false;
 let pushSyncError = false;
+let pushRequest = null;
+let pushStatusAbort = null;
+let pushSyncRequest = null;
+let pushRevision = 0;
+let reminderBusy = false;
 let activePanel = 'progress';
 let pendingCloseRunId = null;
 
@@ -215,9 +221,16 @@ function showLogin(message = '', focus = false) {
   pushBusy = false;
   pushNeedsRenew = false;
   pushSyncError = false;
+  pushStatusAbort?.abort();
+  pushStatusAbort = null;
+  pushRequest = null;
+  pushSyncRequest = null;
+  pushRevision += 1;
+  reminderBusy = false;
   elements['control-form'].reset();
   controlFeedback('');
   elements['push-feedback'].textContent = '';
+  reminderFeedback('');
   renderControl();
   renderPush();
   selectDashboardPanel('progress', false);
@@ -707,45 +720,125 @@ function renderPush() {
   elements['push-disable'].hidden = !pushSubscription;
   elements['push-test'].disabled = pushBusy || !navigator.onLine || !pushConfig?.available;
   elements['push-disable'].disabled = pushBusy || !navigator.onLine;
-  let copy = '官方確認暫留後提醒你回到 Mac 接手確認、填單及付款。';
+  let copy = '官方確認暫留後每 3 秒提醒，直到你按「停止提醒」；請回到 Mac 完成確認與付款。監控截止後，等各時段最後結果確認，再通知一次完整摘要。';
   if (!supported) copy = 'iPhone 需使用 iOS 16.4 以上：在 Safari「分享 → 加入主畫面」，再從主畫面開啟此 PWA 並啟用通知。';
   else if (window.Notification.permission === 'denied') copy = '通知權限已關閉。請到裝置設定允許此 PWA 通知，再重新開啟。';
-  else if (pushSubscription) copy = '這台裝置已啟用通知。官方確認暫留後，會提醒你回到 Mac 確認、填單及付款。';
+  else if (pushSubscription) copy = '這台裝置已啟用通知。官方確認暫留後每 3 秒提醒，直到你按「停止提醒」；請回到 Mac 完成確認與付款。監控截止後，等各時段最後結果確認，再通知一次完整摘要。';
   else if (pushConfig && !pushConfig.available) copy = 'Mac 的推播服務尚未就緒，請在 Mac 完成通知設定後再啟用。';
   if (pushNeedsRenew) copy = 'Mac 通知金鑰已更新，請按「啟用通知」重新登記這台裝置。';
   else if (pushSyncError) copy = '這台裝置尚未成功登記到 Mac，請按「啟用通知」重試。';
   if (control?.demo) copy += ' 演示模式不發送真實推播。';
   elements['push-copy'].textContent = copy;
+  renderReminders();
 }
 
-async function refreshPush() {
-  if (!authenticated || !navigator.onLine) { renderPush(); return; }
+function reminderFeedback(message) {
+  elements['reminder-feedback'].textContent = message;
+  elements['reminder-feedback'].hidden = !message;
+}
+
+function activeReminders() {
+  return Array.isArray(pushConfig?.reminders) ? pushConfig.reminders.filter((item) => item && typeof item.id === 'string'
+    && /^[a-f\d]{64}$/.test(item.id) && typeof item.slot === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(item.slot)) : [];
+}
+
+function renderReminders() {
+  const reminders = activeReminders();
+  elements['reminder-panel'].hidden = !authenticated || !reminders.length;
+  elements['reminder-slots'].textContent = reminders.map((item) => `${typeof item.targetDate === 'string' ? `${item.targetDate} ` : ''}${item.slot}`).join(' · ');
+  elements['reminder-stop'].disabled = !authenticated || !navigator.onLine || reminderBusy || !pushConfig?.available || !reminders.length;
+  elements['reminder-stop'].textContent = reminderBusy ? '正在停止提醒…' : '停止提醒';
+}
+
+async function refreshPush(syncSubscription = true) {
+  if (!authenticated || !navigator.onLine) { renderPush(); return false; }
   const epoch = controlEpoch;
-  try {
-    const response = await api('/api/push');
-    if (response.status === 401 || !response.ok) return;
-    const value = await response.json();
-    if (!authenticated || epoch !== controlEpoch) return;
-    pushConfig = value;
-    if (pushSupported()) {
+  const revision = pushRevision;
+  if (!pushRequest) {
+    const controller = new window.AbortController();
+    pushStatusAbort = controller;
+    const timer = window.setTimeout(() => controller.abort(), 10000);
+    const request = (async () => {
+      try {
+        const response = await api('/api/push', { signal: controller.signal });
+        if (!authenticated || epoch !== controlEpoch || revision !== pushRevision) return false;
+        if (response.status === 401) { showLogin('登入已到期，請重新輸入監控密碼。', true); return false; }
+        if (!response.ok) return false;
+        const value = await response.json();
+        if (!authenticated || epoch !== controlEpoch || revision !== pushRevision) return false;
+        pushConfig = value;
+        return true;
+      } catch { return false; }
+      finally {
+        window.clearTimeout(timer);
+        if (pushStatusAbort === controller) pushStatusAbort = null;
+        if (epoch === controlEpoch) renderPush();
+      }
+    })();
+    pushRequest = request;
+    void request.finally(() => { if (pushRequest === request) pushRequest = null; });
+  }
+  const refreshed = await pushRequest;
+  if (!refreshed || !syncSubscription || !pushSupported() || !authenticated || epoch !== controlEpoch || revision !== pushRevision) return refreshed;
+  if (pushSyncRequest) { await pushSyncRequest; return refreshed; }
+  const synchronization = (async () => {
+    try {
       const registration = await navigator.serviceWorker.ready;
       const subscription = await registration.pushManager.getSubscription();
-      if (!authenticated || epoch !== controlEpoch) return;
+      if (!authenticated || epoch !== controlEpoch || revision !== pushRevision) return;
       pushNeedsRenew = Boolean(subscription && pushConfig.available && !matchingPushKey(subscription, pushConfig.publicKey));
       pushSubscription = null;
       pushSyncError = false;
       if (subscription && pushConfig.available && !pushNeedsRenew && window.Notification.permission === 'granted') {
         // An existing browser subscription alone does not prove the Mac has it.
         const registered = await api('/api/push/subscribe', { method: 'POST', body: JSON.stringify({ subscription: subscription.toJSON() }) });
-        if (!authenticated || epoch !== controlEpoch) return;
+        if (!authenticated || epoch !== controlEpoch || revision !== pushRevision) return;
         if (registered.ok) pushSubscription = subscription;
         else pushSyncError = true;
       }
+    } catch {
+      if (epoch === controlEpoch && revision === pushRevision) { pushSubscription = null; pushSyncError = true; }
+    } finally { if (epoch === controlEpoch) renderPush(); }
+  })();
+  pushSyncRequest = synchronization;
+  try { await synchronization; return refreshed; }
+  finally { if (pushSyncRequest === synchronization) pushSyncRequest = null; }
+}
+
+async function stopReminders() {
+  if (reminderBusy || !authenticated || !navigator.onLine || !pushConfig?.available) return;
+  const reminderIds = activeReminders().map((item) => item.id);
+  if (!reminderIds.length) return;
+  const epoch = controlEpoch;
+  pushStatusAbort?.abort();
+  pushRequest = null;
+  pushRevision += 1;
+  reminderBusy = true;
+  const controller = new window.AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 10000);
+  reminderFeedback('正在停止目前提醒…');
+  renderReminders();
+  try {
+    const response = await api('/api/push/stop', { method: 'POST', body: JSON.stringify({ reminderIds }), signal: controller.signal });
+    if (!authenticated || epoch !== controlEpoch) return;
+    if (response.status === 401) { showLogin('登入已到期，請重新輸入監控密碼。', true); return; }
+    if (!response.ok) {
+      const failure = await response.json().catch(() => ({}));
+      throw new UserMessage(typeof failure.error === 'string' ? failure.error.slice(0, 400) : '停止提醒未完成，請稍後再試。');
     }
-  } catch {
-    if (epoch === controlEpoch) { pushSubscription = null; pushSyncError = true; }
+    pushRevision += 1;
+    pushStatusAbort?.abort();
+    pushRequest = null;
+    pushConfig = { ...pushConfig, reminders: activeReminders().filter((item) => !reminderIds.includes(item.id)) };
+    renderReminders();
+    const refreshed = await refreshPush(false);
+    if (!authenticated || epoch !== controlEpoch) return;
+    reminderFeedback(refreshed ? '已停止目前提醒。之後新搶到的時段仍會再次提醒。' : '已停止目前提醒；最新提醒狀態尚未更新，請重新整理。');
+  } catch (error) {
+    if (authenticated && epoch === controlEpoch) reminderFeedback(error instanceof UserMessage ? error.message : '無法停止提醒，請恢復連線後再試。');
   } finally {
-    if (epoch === controlEpoch) renderPush();
+    window.clearTimeout(timer);
+    if (epoch === controlEpoch) { reminderBusy = false; renderReminders(); }
   }
 }
 
@@ -1026,6 +1119,7 @@ elements['close-confirm'].addEventListener('click', () => {
 elements['push-enable'].addEventListener('click', () => void runPushCommand('subscribe'));
 elements['push-test'].addEventListener('click', () => void runPushCommand('test'));
 elements['push-disable'].addEventListener('click', () => void runPushCommand('unsubscribe'));
+elements['reminder-stop'].addEventListener('click', () => void stopReminders());
 
 window.addEventListener('offline', () => {
   stopConnection();
@@ -1044,7 +1138,9 @@ document.addEventListener('visibilitychange', () => {
   else void checkSession();
 });
 window.setInterval(updateConnection, 1000);
-window.setInterval(() => { if (authenticated && document.visibilityState === 'visible') void refreshControl(); }, 3000);
+window.setInterval(() => {
+  if (authenticated && document.visibilityState === 'visible') { void refreshControl(); if (!reminderBusy) void refreshPush(false); }
+}, 3000);
 
 if ('serviceWorker' in navigator && window.isSecureContext) {
   navigator.serviceWorker.register('/sw.js').catch(() => {

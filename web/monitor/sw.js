@@ -1,5 +1,5 @@
 const CACHE_PREFIX = 'takachiho-monitor-shell-';
-const CACHE_NAME = `${CACHE_PREFIX}v7`;
+const CACHE_NAME = `${CACHE_PREFIX}v9`;
 const SHELL_ASSETS = [
   '/', '/styles.css', '/app.js', '/manifest.webmanifest',
   '/icons/icon.svg', '/icons/icon-192.png', '/icons/icon-512.png',
@@ -47,7 +47,7 @@ self.addEventListener('push', (event) => {
   const title = typeof payload.title === 'string' ? payload.title.slice(0, 120) : '高千穗 · 搶位通知';
   const body = typeof payload.body === 'string' ? payload.body.slice(0, 400) : '請開啟控制台查看最新進度，並在 Mac 完成確認與付款。';
   event.waitUntil(self.registration.showNotification(title, {
-    body, icon: '/icons/icon-192.png', badge: '/icons/icon-192.png',
+    body, icon: '/icons/icon-192.png', badge: '/icons/icon-192.png', silent: false,
     tag: typeof payload.tag === 'string' ? payload.tag.slice(0, 160) : 'takachiho-reservation',
     data: { url: '/' },
   }));

@@ -1,14 +1,17 @@
 import { createECDH, randomBytes } from 'node:crypto';
-import { mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createMonitorPush, type MonitorPushOptions } from '../src/monitor-push.js';
+import { createMonitorPush, type MonitorPush, type MonitorPushOptions } from '../src/monitor-push.js';
 import { MonitorState, type MonitorSnapshot } from '../src/monitor-state.js';
+import { ArtifactsMonitor } from '../src/monitor-source.js';
 
 type Send = NonNullable<MonitorPushOptions['send']>;
 const temporary: string[] = [];
+const instances: MonitorPush[] = [];
 afterEach(async () => {
+  await Promise.all(instances.splice(0).map((push) => push.close()));
   vi.useRealTimers();
   await Promise.all(temporary.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
@@ -16,8 +19,10 @@ afterEach(async () => {
 async function fixture(send: MonitorPushOptions['send'] = vi.fn<Send>(async () => undefined)) {
   const directory = await mkdtemp(join(tmpdir(), 'takachiho-push-'));
   temporary.push(directory);
-  const options = { directory, send };
-  return { directory, options, send, push: await createMonitorPush(options) };
+  const options = { directory, send, schedule: false };
+  const push = await createMonitorPush(options);
+  instances.push(push);
+  return { directory, options, send, push };
 }
 
 function subscription(token = 'device-1') {
@@ -49,12 +54,68 @@ function waiting(): MonitorSnapshot {
 }
 
 describe('durable monitor Web Push', () => {
+  it.each(['hold-response', 'customer-form-ready', 'customer_form_ready'].flatMap((event) => [
+    { event, zone: '+08:00', releaseAt: '2026-10-14T17:05+08:00', monitorFromAt: '2026-10-14T17:04+08:00', monitorUntil: '2026-10-14T17:08+08:00' },
+    { event, zone: 'Z', releaseAt: '2026-10-14T09:05Z', monitorFromAt: '2026-10-14T09:04Z', monitorUntil: '2026-10-14T09:08Z' },
+  ]))('notifies and repeats a confirmed $event from artifact logs with minute-precision $zone schedules', async (schedule) => {
+    vi.useFakeTimers();
+    const now = Date.parse('2026-10-14T09:07:10.000Z');
+    vi.setSystemTime(now);
+    const send = vi.fn<Send>(async () => undefined);
+    const { push, directory } = await fixture(send);
+    await push.subscribe(subscription());
+    const artifactsDir = join(directory, 'artifacts');
+    const runDir = join(artifactsDir, '2026-10-14T09-07-00-000Z-live-abcdef12');
+    await mkdir(runDir, { recursive: true });
+    const eventsFile = join(runDir, 'events.jsonl');
+    const line = (event: string, epochMs: number, data: Record<string, unknown> = {}, slot?: string): string =>
+      `${JSON.stringify({ mode: 'live', epochMs, event, data, ...(slot ? { slot } : {}) })}\n`;
+    await writeFile(eventsFile, line('run_started', now - 10_000, {
+      slots: ['08:30'], targetDate: '2026-10-28', releaseAt: schedule.releaseAt,
+      monitorFromAt: schedule.monitorFromAt, monitorUntil: schedule.monitorUntil,
+    }) + line('monitor_heartbeat', now - 1000, { automationActive: true })
+      + line('hold-response', now - 1, { status: 200, result: '0' }, '08:30'));
+    const source = new ArtifactsMonitor(artifactsDir);
+    await source.refresh();
+    await push.observe(source.snapshot());
+    expect(send).not.toHaveBeenCalled();
+    expect(source.snapshot().run!.monitorUntil).toBe(Date.parse('2026-10-14T09:08:00Z'));
+
+    await appendFile(eventsFile, line(schedule.event, now, { status: 200, result: '1' }, '08:30'));
+    await source.refresh();
+    expect(source.snapshot().slots[0]).toMatchObject({ holdConfirmed: true, heldAt: now });
+    // Even an unavailable schedule projection cannot suppress proven holds.
+    const held = source.snapshot();
+    held.run!.monitorUntil = null;
+    held.run!.releaseAt = null;
+    held.run!.monitorFrom = null;
+    await push.observe(held);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(send.mock.calls[0]![1])).toMatchObject({ title: '高千穗船位已暫留',
+      body: '2026-10-28 08:30 已暫留，請到 Mac 接手確認付款' });
+    expect(push.status().reminders).toHaveLength(1);
+
+    vi.setSystemTime(now + 1000);
+    await appendFile(eventsFile, line('autofill_result', now + 1000, { customerFieldsVerified: false }, '08:30'));
+    await source.refresh();
+    await push.observe(source.snapshot());
+    expect(source.snapshot().slots[0]).toMatchObject({ phase: 'manual', holdConfirmed: true, heldAt: now });
+    expect(send).toHaveBeenCalledTimes(1);
+    vi.setSystemTime(now + 3000);
+    await push.observe(source.snapshot());
+    expect(send).toHaveBeenCalledTimes(2);
+    await push.stop(push.status().reminders.map((item) => item.id));
+    vi.setSystemTime(now + 6000);
+    await push.observe(source.snapshot());
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps VAPID keys and subscriptions private and reuses keys after restart', async () => {
     const { push, directory, options } = await fixture();
     await push.subscribe(subscription());
     const restarted = await createMonitorPush(options);
     expect(restarted.publicKey).toBe(push.publicKey);
-    expect(restarted.status()).toEqual({ available: true, publicKey: push.publicKey });
+    expect(restarted.status()).toEqual({ available: true, publicKey: push.publicKey, reminders: [] });
     for (const file of ['vapid.json', 'subscriptions.json']) {
       expect((await stat(join(directory, file))).mode & 0o777).toBe(0o600);
     }
@@ -62,26 +123,33 @@ describe('durable monitor Web Push', () => {
     expect(JSON.parse(await readFile(join(directory, 'subscriptions.json'), 'utf8')).subscriptions).toHaveLength(1);
   });
 
-  it('notifies each confirmed slot once even when its final phase is manual, including after restart', async () => {
+  it('repeats every three seconds beyond the old cutoff with unique display tags and short provider TTL', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-13T10:00:00Z'));
     const send = vi.fn<Send>(async () => undefined);
-    const { push, options } = await fixture(send);
+    const { push } = await fixture(send);
     const item = subscription();
     await push.subscribe(item);
     await push.observe(waiting());
-    await push.observe(snapshot(['11:00'], { phase: 'manual' }));
-    await push.observe(snapshot(['11:00'], { phase: 'manual' }));
-    await push.observe(snapshot(['11:00', '11:30']));
+    const hold = snapshot(['11:00'], { phase: 'manual' });
+    await push.observe(hold);
+    vi.setSystemTime(Date.now() + 2999);
+    await push.observe(hold);
+    expect(send).toHaveBeenCalledTimes(1);
+    vi.setSystemTime(Date.now() + 1);
+    await push.observe(hold);
     expect(send).toHaveBeenCalledTimes(2);
     const first = JSON.parse(send.mock.calls[0]![1]);
     expect(first).toMatchObject({ url: '/', title: '高千穗船位已暫留',
-      body: '2026-10-26 11:00 已暫留，請到 Mac 接手確認付款', tag: 'takachiho-live-test-run-1100' });
-    expect(send.mock.calls[0]![2]).toMatchObject({ TTL: 119, urgency: 'high', contentEncoding: 'aes128gcm' });
-    const restarted = await createMonitorPush(options);
-    await restarted.observe(snapshot(['11:00', '11:30']));
-    await restarted.observe(snapshot(['11:00', '11:30']));
-    expect(send).toHaveBeenCalledTimes(2);
-    await restarted.observe(snapshot(['11:00'], { runId: 'another-run' }));
+      body: '2026-10-26 11:00 已暫留，請到 Mac 接手確認付款' });
+    expect(send.mock.calls[0]![2]).toMatchObject({ TTL: 3, urgency: 'high', contentEncoding: 'aes128gcm' });
+    expect(JSON.parse(send.mock.calls[1]![1]).tag).not.toBe(first.tag);
+    expect(send.mock.calls[1]![2].topic).toBe(send.mock.calls[0]![2].topic);
+    vi.setSystemTime(Date.now() + 180_000);
+    hold.connection = 'ended';
+    await push.observe(hold);
     expect(send).toHaveBeenCalledTimes(3);
+    expect(push.status().reminders).toHaveLength(1);
   });
 
   it('baselines historical holds on startup, including stale snapshots that later become live', async () => {
@@ -133,13 +201,14 @@ describe('durable monitor Web Push', () => {
     expect(send).toHaveBeenCalledTimes(2);
   });
 
-  it('retries failed recipients only with a bounded count and isolates all send errors', async () => {
+  it('backs off failures without slowing healthy devices and resets backoff after recovery', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-13T10:00:00Z'));
     const good = subscription('good');
     const failing = subscription('failing');
+    let failingNow = true;
     const send = vi.fn(async (item: { endpoint: string }) => {
-      if (item.endpoint === failing.endpoint) throw Object.assign(new Error('PRIVATE failure'), { statusCode: 503 });
+      if (item.endpoint === failing.endpoint && failingNow) throw Object.assign(new Error('PRIVATE failure'), { statusCode: 503 });
     });
     const { push } = await fixture(send);
     await push.subscribe(good);
@@ -158,11 +227,17 @@ describe('durable monitor Web Push', () => {
     vi.setSystemTime(Date.now() + 20_000);
     hold.serverTime = Date.now(); hold.heartbeatAt = Date.now();
     await push.observe(hold);
-    expect(send.mock.calls.filter(([item]) => item.endpoint === good.endpoint)).toHaveLength(1);
-    expect(send.mock.calls.filter(([item]) => item.endpoint === failing.endpoint)).toHaveLength(3);
+    expect(send.mock.calls.filter(([item]) => item.endpoint === good.endpoint)).toHaveLength(4);
+    expect(send.mock.calls.filter(([item]) => item.endpoint === failing.endpoint)).toHaveLength(4);
+    failingNow = false;
+    vi.setSystemTime(Date.now() + 40_000);
+    await push.observe(hold);
+    vi.setSystemTime(Date.now() + 3000);
+    await push.observe(hold);
+    expect(send.mock.calls.filter(([item]) => item.endpoint === failing.endpoint)).toHaveLength(6);
   });
 
-  it('coalesces a slow send backlog and recalculates TTL when later recipients are sent', async () => {
+  it('does not let a slow device block healthy repeats or the durable stop command', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-13T10:00:00Z'));
     let release!: () => void;
@@ -173,31 +248,33 @@ describe('durable monitor Web Push', () => {
     const send = vi.fn<Send>(async () => {
       if (first) { first = false; notifyStarted(); await gate; }
     });
-    const { push } = await fixture(send);
+    const { push, options } = await fixture(send);
     await push.subscribe(subscription('first'));
     await push.subscribe(subscription('second'));
     await push.observe(waiting());
-    let reads = 0;
-    const observed = (held: readonly string[]) => {
-      const value = snapshot(held);
-      const slots = value.slots;
-      Object.defineProperty(value, 'slots', { get: () => { reads += 1; return slots; } });
-      return value;
-    };
-    const running = push.observe(observed(['11:00']));
+    const hold = snapshot(['11:00']);
+    const running = push.observe(hold);
     await started;
-    for (let i = 0; i < 100; i += 1) expect(push.observe(observed(['11:00', '11:30']))).toBe(running);
-    vi.setSystemTime(Date.now() + 15_000);
+    await push.observe(hold);
+    expect(send).toHaveBeenCalledTimes(2);
+    vi.setSystemTime(Date.now() + 3000);
+    await push.observe(hold);
+    expect(send).toHaveBeenCalledTimes(3);
+    const ids = push.status().reminders.map((reminder) => reminder.id);
+    await push.stop(ids);
+    expect(push.status().reminders).toEqual([]);
     release();
     await running;
-    expect(reads).toBe(2);
-    expect(send).toHaveBeenCalledTimes(4);
-    expect(send.mock.calls[0]![2]).toMatchObject({ TTL: 119 });
-    expect(send.mock.calls[1]![2]).toMatchObject({ TTL: 104 });
-    expect(send.mock.calls[2]![2]).toMatchObject({ TTL: 104 });
+    vi.setSystemTime(Date.now() + 30_000);
+    await push.observe(hold);
+    const restarted = await createMonitorPush(options);
+    await restarted.observe(hold);
+    await restarted.observe(hold);
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(restarted.status().reminders).toEqual([]);
   });
 
-  it('resumes pending recipient retries across restart without resending to successful devices', async () => {
+  it('resumes active reminders and recipient backoff across restart without replaying the first round', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-13T10:00:00Z'));
     const good = subscription('good');
@@ -218,8 +295,199 @@ describe('durable monitor Web Push', () => {
     vi.setSystemTime(Date.now() + 5000);
     hold.serverTime = Date.now(); hold.heartbeatAt = Date.now();
     await restarted.observe(hold);
-    expect(send.mock.calls.filter(([item]) => item.endpoint === good.endpoint)).toHaveLength(1);
+    expect(send.mock.calls.filter(([item]) => item.endpoint === good.endpoint)).toHaveLength(2);
     expect(send.mock.calls.filter(([item]) => item.endpoint === failing.endpoint)).toHaveLength(2);
+  });
+
+  it('autonomously repeats without fresh snapshots and disposes its timer on close', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-13T10:00:00Z'));
+    let notifyNext!: () => void;
+    const next = new Promise<void>((resolve) => { notifyNext = resolve; });
+    const send = vi.fn<Send>(async () => { if (send.mock.calls.length === 2) notifyNext(); });
+    const { options, push } = await fixture(send);
+    await push.subscribe(subscription());
+    await push.close();
+    const scheduled = await createMonitorPush({ ...options, schedule: true });
+    instances.push(scheduled);
+    await scheduled.observe(waiting());
+    await scheduled.observe(snapshot(['11:00']));
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(send).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await next;
+    expect(send).toHaveBeenCalledTimes(2);
+    await scheduled.close();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops only the selected reminders and lets a later hold start its own reminder', async () => {
+    const send = vi.fn<Send>(async () => undefined);
+    const { push } = await fixture(send);
+    await push.subscribe(subscription());
+    await push.observe(waiting());
+    await push.observe(snapshot(['11:00']));
+    const ids = push.status().reminders.map((item) => item.id);
+    await push.observe(snapshot(['11:00', '11:30']));
+    await push.stop(ids);
+    await push.stop(ids); // A retry of the same stop is safe.
+    expect(push.status().reminders.map((item) => item.slot)).toEqual(['11:30']);
+    await push.observe(snapshot(['11:00', '11:30']));
+    expect(send).toHaveBeenCalledTimes(2);
+    await expect(push.stop([ids[0], 'a'.repeat(64)])).rejects.toMatchObject({ status: 404 });
+    for (const value of [undefined, [], 'bad', ['bad'], [ids[0], ids[0]]]) {
+      await expect(push.stop(value)).rejects.toMatchObject({ status: 400 });
+    }
+    expect(push.status().reminders.map((item) => item.slot)).toEqual(['11:30']);
+  });
+
+  it('does not convert legacy pending one-shot notifications into repeating alarms', async () => {
+    const send = vi.fn<Send>(async () => undefined);
+    const { push, options, directory } = await fixture(send);
+    await push.subscribe(subscription());
+    await push.observe(waiting());
+    const hold = snapshot(['11:00']);
+    await push.observe(hold);
+    const state = JSON.parse(await readFile(join(directory, 'subscriptions.json'), 'utf8'));
+    state.version = 1;
+    state.deliveries = state.deliveries.map((item: { id: string; at: number; payload: string; recipients: { id: string; nextAttemptAt: number }[] }) => ({
+      id: item.id, at: item.at, baseline: false, payload: item.payload,
+      recipients: item.recipients.map((recipient) => ({ ...recipient, attempts: 1, delivered: false })),
+    }));
+    await writeFile(join(directory, 'subscriptions.json'), JSON.stringify(state));
+    const restarted = await createMonitorPush(options);
+    await restarted.observe(hold);
+    await restarted.observe(hold);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(restarted.status().reminders).toEqual([]);
+    expect(JSON.parse(await readFile(join(directory, 'subscriptions.json'), 'utf8')).version).toBe(3);
+  });
+
+  it('migrates version two without losing active alarms, stopped alarms or device cooldown', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-13T10:00:00Z'));
+    const send = vi.fn<Send>(async () => undefined);
+    const { push, options, directory } = await fixture(send);
+    await push.subscribe(subscription());
+    await push.observe(waiting());
+    const hold = snapshot(['11:00', '11:30']);
+    await push.observe(hold);
+    await push.stop([push.status().reminders[0]!.id]);
+    await push.close();
+    const prior = JSON.parse(await readFile(join(directory, 'subscriptions.json'), 'utf8'));
+    prior.version = 2;
+    delete prior.summaries;
+    prior.subscriptions[0].nextAllowedAt = Date.now() + 12_000;
+    await writeFile(join(directory, 'subscriptions.json'), JSON.stringify(prior));
+    const restarted = await createMonitorPush(options);
+    instances.push(restarted);
+    await restarted.observe(hold);
+    expect(restarted.status().reminders.map((item) => item.slot)).toEqual(['11:30']);
+    expect(send).toHaveBeenCalledTimes(1);
+    vi.setSystemTime(Date.now() + 12_000);
+    await restarted.observe(hold);
+    expect(send).toHaveBeenCalledTimes(2);
+    const migrated = JSON.parse(await readFile(join(directory, 'subscriptions.json'), 'utf8'));
+    expect(migrated.version).toBe(3);
+    expect(migrated.summaries).toEqual([]);
+    expect(migrated.deliveries).toHaveLength(2);
+  });
+
+  it.each(['12', 'Tue, 13 Oct 2026 10:00:12 GMT'])('honors Retry-After %s across slots and restarts', async (retryAfter) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-13T10:00:00Z'));
+    let fail = true;
+    const send = vi.fn<Send>(async () => {
+      if (fail) throw Object.assign(new Error('PRIVATE'), { statusCode: 429, headers: { 'retry-after': retryAfter } });
+    });
+    const { push, options } = await fixture(send);
+    await push.subscribe(subscription());
+    await push.observe(waiting());
+    await push.observe(snapshot(['11:00']));
+    await push.observe(snapshot(['11:00', '11:30']));
+    expect(send).toHaveBeenCalledTimes(1);
+    const restarted = await createMonitorPush(options);
+    await restarted.observe(snapshot(['11:00', '11:30']));
+    vi.setSystemTime(Date.now() + 11_999);
+    await restarted.observe(snapshot(['11:00', '11:30']));
+    expect(send).toHaveBeenCalledTimes(1);
+    fail = false;
+    vi.setSystemTime(Date.now() + 1);
+    await restarted.observe(snapshot(['11:00', '11:30']));
+    expect(send).toHaveBeenCalledTimes(2);
+    // The other slot gets the same device after the first request has finished.
+    await restarted.observe(snapshot(['11:00', '11:30']));
+    expect(send).toHaveBeenCalledTimes(3);
+  });
+
+  it('allows stopping reminders while a test notification is still in flight', async () => {
+    let release!: () => void;
+    let notifyStarted!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+    const send = vi.fn<Send>(async (_item, body) => {
+      if (JSON.parse(body).tag === 'takachiho-test') { notifyStarted(); await gate; }
+    });
+    const { push } = await fixture(send);
+    const item = subscription();
+    await push.subscribe(item);
+    await push.observe(waiting());
+    await push.observe(snapshot(['11:00']));
+    const running = push.test(item.endpoint);
+    await started;
+    await push.stop(push.status().reminders.map((reminder) => reminder.id));
+    expect(push.status().reminders).toEqual([]);
+    release();
+    await running;
+  });
+
+  it('serializes concurrent reminder groups for the same device while keeping both groups active', async () => {
+    let release!: () => void;
+    let notifyStarted!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+    let first = true;
+    const send = vi.fn<Send>(async () => {
+      if (first) { first = false; notifyStarted(); await gate; }
+    });
+    const { push } = await fixture(send);
+    await push.subscribe(subscription());
+    await push.observe(waiting());
+    const hold = snapshot(['11:00', '11:30']);
+    const running = push.observe(hold);
+    await started;
+    await push.observe(hold);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(push.status().reminders.map((item) => item.slot)).toEqual(['11:00', '11:30']);
+    release();
+    await running;
+    await push.observe(hold);
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(send.mock.calls[0]![1]).body).toContain('11:00');
+    expect(JSON.parse(send.mock.calls[1]![1]).body).toContain('11:30');
+  });
+
+  it('retains provider cooldown when the browser re-registers its subscription', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-13T10:00:00Z'));
+    let fail = true;
+    const send = vi.fn<Send>(async () => {
+      if (fail) throw Object.assign(new Error('PRIVATE'), { statusCode: 429, headers: { 'retry-after': '12' } });
+    });
+    const { push } = await fixture(send);
+    const item = subscription();
+    await push.subscribe(item);
+    await push.observe(waiting());
+    await push.observe(snapshot(['11:00']));
+    await push.subscribe(item);
+    vi.setSystemTime(Date.now() + 11_999);
+    await push.observe(snapshot(['11:00', '11:30']));
+    expect(send).toHaveBeenCalledTimes(1);
+    fail = false;
+    vi.setSystemTime(Date.now() + 1);
+    await push.observe(snapshot(['11:00', '11:30']));
+    expect(send).toHaveBeenCalledTimes(2);
   });
 
   it.each([404, 410])('removes expired provider subscriptions on HTTP %i', async (statusCode) => {

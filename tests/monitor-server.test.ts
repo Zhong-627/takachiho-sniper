@@ -253,17 +253,19 @@ describe('monitoring route boundaries', () => {
 });
 
 describe('authenticated PWA control routes', () => {
-  it('requires login and same-origin POST for control, push subscriptions and test sends', async () => {
+  it('requires login and same-origin POST for controls, push sends and stopping reminders', async () => {
     let sends = 0;
+    const stops: unknown[] = [];
     const push: MonitorPush = {
-      publicKey: 'public-vapid-key', status: () => ({ available: true, publicKey: 'public-vapid-key' }),
+      publicKey: 'public-vapid-key', status: () => ({ available: true, publicKey: 'public-vapid-key', reminders: [] }),
       subscribe: async () => undefined, unsubscribe: async () => undefined,
       test: async () => { sends += 1; }, observe: async () => undefined,
+      stop: async (ids) => { stops.push(ids); }, close: async () => undefined,
     };
     const control = createDemoControl();
     const { url } = await start({ control, push });
     for (const path of ['/api/control', '/api/push']) expect((await fetch(`${url}${path}`)).status).toBe(401);
-    for (const path of ['/api/control/start', '/api/control/stop', '/api/control/handoff', '/api/control/close', '/api/push/subscribe', '/api/push/test']) {
+    for (const path of ['/api/control/start', '/api/control/stop', '/api/control/handoff', '/api/control/close', '/api/push/subscribe', '/api/push/test', '/api/push/stop']) {
       expect((await post(url, path, { confirmed: true })).status).toBe(401);
     }
     const cookie = await signIn(url);
@@ -271,6 +273,10 @@ describe('authenticated PWA control routes', () => {
     expect(await state.json()).toMatchObject({ demo: true, worker: null });
     expect((await post(url, '/api/control/start', { confirmed: true }, { Cookie: cookie, Origin: 'https://evil.test' })).status).toBe(403);
     expect((await post(url, '/api/push/test', { endpoint: 'test' }, { Cookie: cookie, Origin: 'https://evil.test' })).status).toBe(403);
+    const reminderIds = ['a'.repeat(64), 'b'.repeat(64)];
+    expect((await post(url, '/api/push/stop', { reminderIds }, { Cookie: cookie, Origin: 'https://evil.test' })).status).toBe(403);
+    expect((await post(url, '/api/push/stop', { reminderIds }, { Cookie: cookie, Origin: '' })).status).toBe(403);
+    expect(stops).toEqual([]);
     expect(sends).toBe(0);
     expect((await post(url, '/api/control/start', { confirmed: true, command: 'rm' }, { Cookie: cookie })).status).toBe(400);
     expect((await post(url, '/api/control/start', { confirmed: true }, { Cookie: cookie })).status).toBe(400);
@@ -283,6 +289,13 @@ describe('authenticated PWA control routes', () => {
     expect((await post(url, '/api/control/close', { runId: body.worker.runId }, { Cookie: cookie })).status).toBe(200);
     expect((await post(url, '/api/push/test', { endpoint: 'test' }, { Cookie: cookie })).status).toBe(200);
     expect(sends).toBe(1);
+    expect((await post(url, '/api/push/stop', { reminderIds, endpoint: 'extra' }, { Cookie: cookie })).status).toBe(400);
+    expect(stops).toEqual([]);
+    const stopped = await post(url, '/api/push/stop', { reminderIds }, { Cookie: cookie });
+    expect(stopped.status).toBe(200);
+    expect(await stopped.json()).toEqual({ ok: true });
+    expect(stops).toEqual([reminderIds]);
+    expect((await fetch(`${url}/api/push/stop`, { headers: { Cookie: cookie } })).status).toBe(405);
   });
 
   it('returns only controlled safe errors and hides unexpected exception details', async () => {
@@ -298,7 +311,7 @@ describe('authenticated PWA control routes', () => {
     response = await post(url, '/api/control/start', payload, { Cookie: cookie });
     expect(response.status).toBe(500);
     expect(await response.text()).not.toContain('PRIVATE');
-    expect(await (await fetch(`${url}/api/push`, { headers: { Cookie: cookie } })).json()).toEqual({ available: false, publicKey: '' });
+    expect(await (await fetch(`${url}/api/push`, { headers: { Cookie: cookie } })).json()).toEqual({ available: false, publicKey: '', reminders: [] });
   });
 });
 

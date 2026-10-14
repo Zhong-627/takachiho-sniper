@@ -126,12 +126,14 @@ async function main(): Promise<void> {
   refresh.unref();
   const stop = (): void => {
     clearInterval(refresh);
+    void push?.close();
     server.close(() => { console.log('監控服務已停止，搶位程式不受影響。'); });
   };
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
   server.once('error', () => {
     clearInterval(refresh);
+    void push?.close();
     console.error('監控服務無法啟動，請確認本機 port 未被使用。');
     process.exitCode = 1;
   });

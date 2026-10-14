@@ -262,7 +262,7 @@ export function createMonitorServer(options: MonitorServerOptions): Server {
       } : {}),
       '/api/push': 'GET',
       ...(options.push ? {
-        '/api/push/subscribe': 'POST', '/api/push/unsubscribe': 'POST', '/api/push/test': 'POST',
+        '/api/push/subscribe': 'POST', '/api/push/unsubscribe': 'POST', '/api/push/test': 'POST', '/api/push/stop': 'POST',
       } : {}),
     };
     const requiredMethod = apiMethods[path];
@@ -322,7 +322,7 @@ export function createMonitorServer(options: MonitorServerOptions): Server {
         reply(response, 200, { ...await options.control.snapshot() }); return;
       }
       if (path === '/api/push') {
-        reply(response, 200, options.push?.status() ?? { available: false, publicKey: '' }); return;
+        reply(response, 200, options.push ? { ...options.push.status() } : { available: false, publicKey: '', reminders: [] }); return;
       }
       const body = await jsonBody(request);
       if (path === '/api/control/settings' && options.control) {
@@ -338,7 +338,10 @@ export function createMonitorServer(options: MonitorServerOptions): Server {
         reply(response, 200, { ...await options.control.command(command, body.runId, body.slot) }); return;
       }
       if (options.push) {
-        if (path === '/api/push/subscribe') {
+        if (path === '/api/push/stop') {
+          if (Object.keys(body).some((key) => key !== 'reminderIds')) throw new RequestFailure(400);
+          await options.push.stop(body.reminderIds);
+        } else if (path === '/api/push/subscribe') {
           if (Object.keys(body).some((key) => key !== 'subscription')) throw new RequestFailure(400);
           await options.push.subscribe(body.subscription);
         } else {
